@@ -10,7 +10,7 @@ from .database import Task
 
 logger = logging.getLogger(__name__)
 
-def sync_task_created(settings: Settings, task: Task) -> None:
+def sync_task_created(settings: Settings, task: Task) -> str | None:
     if not settings.notion_token:
         return
 
@@ -38,8 +38,11 @@ def sync_task_created(settings: Settings, task: Task) -> None:
                 response.status_code,
                 response.text,
             )
+            return None
+        return response.json().get("id")
     except Exception:
         logger.exception("Notion API request failed")
+        return None
 
 
 def _build_database_payload(settings: Settings, task: Task) -> dict:
@@ -55,6 +58,8 @@ def _build_database_payload(settings: Settings, task: Task) -> dict:
         payload["properties"][settings.notion_prop_status] = {
             "select": {"name": settings.notion_status_value}
         }
+    if settings.notion_prop_done:
+        payload["properties"][settings.notion_prop_done] = {"checkbox": False}
     if task.due_at and settings.notion_prop_due:
         payload["properties"][settings.notion_prop_due] = {
             "date": {"start": task.due_at.isoformat()}
@@ -68,15 +73,35 @@ def _build_database_payload(settings: Settings, task: Task) -> dict:
 
 def _build_page_payload(settings: Settings, task: Task) -> dict:
     children = [
-        {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
-            {"type": "text", "text": {"content": f"Срок: {task.due_at.isoformat() if task.due_at else '—'}"}}
-        ]}},
-        {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
-            {"type": "text", "text": {"content": f"Напоминание: {task.remind_at.isoformat() if task.remind_at else '—'}"}}
-        ]}},
-        {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
-            {"type": "text", "text": {"content": f"Повтор: {task.repeat_rule or '—'}"}}
-        ]}},
+        {
+            "object": "block",
+            "type": "to_do",
+            "to_do": {
+                "checked": False,
+                "rich_text": [{"type": "text", "text": {"content": task.title}}],
+            },
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": f"Срок: {task.due_at.isoformat() if task.due_at else '—'}"}}
+            ]},
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": f"Напоминание: {task.remind_at.isoformat() if task.remind_at else '—'}"}}
+            ]},
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": f"Повтор: {task.repeat_rule or '—'}"}}
+            ]},
+        },
     ]
     return {
         "parent": {"page_id": settings.notion_page_id},
@@ -85,6 +110,67 @@ def _build_page_payload(settings: Settings, task: Task) -> dict:
         },
         "children": children,
     }
+
+
+def get_page(settings: Settings, page_id: str) -> dict | None:
+    try:
+        response = requests.get(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            headers={
+                "Authorization": f"Bearer {settings.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            logger.error("Notion API error %s: %s", response.status_code, response.text)
+            return None
+        return response.json()
+    except Exception:
+        logger.exception("Notion API request failed")
+        return None
+
+
+def get_page_blocks(settings: Settings, page_id: str) -> list[dict]:
+    try:
+        response = requests.get(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers={
+                "Authorization": f"Bearer {settings.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            logger.error("Notion API error %s: %s", response.status_code, response.text)
+            return []
+        return response.json().get("results", [])
+    except Exception:
+        logger.exception("Notion API request failed")
+        return []
+
+
+def archive_page(settings: Settings, page_id: str) -> bool:
+    try:
+        response = requests.patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            json={"archived": True},
+            headers={
+                "Authorization": f"Bearer {settings.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            logger.error("Notion API error %s: %s", response.status_code, response.text)
+            return False
+        return True
+    except Exception:
+        logger.exception("Notion API request failed")
+        return False
 
 
 def format_date(value: datetime | None) -> str | None:

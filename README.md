@@ -9,10 +9,13 @@
 - Парсинг текста и сроков через Perplexity (опционально)
 - Запись задач в Notion
 - Доступ только для разрешенных пользователей
+- Автосводки задач в 10:00, 15:00 и 19:00 по МСК
+- Проверка закрытых задач каждые `SYNC_INTERVAL_MINUTES`
 
 ## Требования
 - Python 3.11+
 - Токен Telegram бота
+- Зависимости с `job-queue` (установятся через `requirements.txt`)
 
 ## Установка
 ```bash
@@ -52,6 +55,8 @@ NOTION_PROP_STATUS=Status
 NOTION_STATUS_VALUE=Open
 NOTION_PROP_DUE=Due
 NOTION_PROP_REPEAT=Repeat
+NOTION_PROP_DONE=Done
+SYNC_INTERVAL_MINUTES=5
 ```
 
 ## Примеры сообщений
@@ -63,4 +68,6 @@ NOTION_PROP_REPEAT=Repeat
 - Если напоминание не указано, бот не отправит уведомление
 - `NOTION_TOKEN`, `NOTION_DB_ID` и `ALLOWED_USER_IDS` обязательны для запуска
 - Нужен либо `NOTION_DB_ID`, либо `NOTION_PAGE_ID`
+- Для базы Notion чекбокс “Готово” задается через `NOTION_PROP_DONE`
 - Если поля в базе Notion называются иначе, поменяй `NOTION_PROP_*`
+- Частоту синхронизации закрытия меняй через `SYNC_INTERVAL_MINUTES`

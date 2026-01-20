@@ -20,6 +20,8 @@ class Settings:
     notion_prop_due: str | None
     notion_prop_repeat: str | None
     notion_status_value: str | None
+    notion_prop_done: str | None
+    sync_interval_minutes: int
 
 
 def load_settings() -> Settings:
@@ -41,6 +43,11 @@ def load_settings() -> Settings:
     notion_prop_due = os.getenv("NOTION_PROP_DUE", "Due").strip() or None
     notion_prop_repeat = os.getenv("NOTION_PROP_REPEAT", "Repeat").strip() or None
     notion_status_value = os.getenv("NOTION_STATUS_VALUE", "Open").strip() or None
+    notion_prop_done = os.getenv("NOTION_PROP_DONE", "Done").strip() or None
+    sync_interval_raw = os.getenv("SYNC_INTERVAL_MINUTES", "5").strip()
+    sync_interval_minutes = int(sync_interval_raw) if sync_interval_raw.isdigit() else 5
+    if sync_interval_minutes < 1:
+        sync_interval_minutes = 1
 
     allowed_raw = os.getenv("ALLOWED_USER_IDS", "").strip()
     if not allowed_raw:
@@ -72,4 +79,6 @@ def load_settings() -> Settings:
         notion_prop_due=notion_prop_due,
         notion_prop_repeat=notion_prop_repeat,
         notion_status_value=notion_status_value,
+        notion_prop_done=notion_prop_done,
+        sync_interval_minutes=sync_interval_minutes,
     )

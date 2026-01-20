@@ -17,6 +17,7 @@ class Task:
     due_at: datetime | None
     remind_at: datetime | None
     repeat_rule: str | None
+    notion_page_id: str | None
     status: str
     created_at: datetime
     updated_at: datetime
@@ -42,12 +43,14 @@ def init_db(db_path: str) -> None:
                 due_at TEXT,
                 remind_at TEXT,
                 repeat_rule TEXT,
+                notion_page_id TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        _ensure_column(conn, "tasks", "notion_page_id", "TEXT")
         conn.commit()
 
 
@@ -61,6 +64,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         due_at=_to_dt(row["due_at"]),
         remind_at=_to_dt(row["remind_at"]),
         repeat_rule=row["repeat_rule"],
+        notion_page_id=row["notion_page_id"],
         status=row["status"],
         created_at=_to_dt(row["created_at"]) or datetime.utcnow(),
         updated_at=_to_dt(row["updated_at"]) or datetime.utcnow(),
@@ -86,9 +90,9 @@ def create_task(db_path: str, task: Task) -> int:
             """
             INSERT INTO tasks (
                 user_id, chat_id, title, description, due_at, remind_at,
-                repeat_rule, status, created_at, updated_at
+                repeat_rule, notion_page_id, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task.user_id,
@@ -98,6 +102,7 @@ def create_task(db_path: str, task: Task) -> int:
                 _to_str(task.due_at),
                 _to_str(task.remind_at),
                 task.repeat_rule,
+                task.notion_page_id,
                 task.status,
                 _to_str(task.created_at),
                 _to_str(task.updated_at),
@@ -171,6 +176,18 @@ def update_task_remind_at(db_path: str, task_id: int, remind_at: datetime) -> No
         conn.commit()
 
 
+def update_task_notion_id(db_path: str, task_id: int, notion_page_id: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET notion_page_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (notion_page_id, _to_str(datetime.utcnow()), task_id),
+        )
+        conn.commit()
+
+
 def list_future_reminders(db_path: str, now: datetime) -> list[Task]:
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -193,3 +210,45 @@ def list_due_tasks(db_path: str, now: datetime) -> Iterable[Task]:
             (_to_str(now),),
         ).fetchall()
     return [_row_to_task(row) for row in rows]
+
+
+def list_tasks_for_chat(db_path: str, chat_id: int, status: str = "open") -> list[Task]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM tasks
+            WHERE chat_id = ? AND status = ?
+            ORDER BY COALESCE(due_at, created_at)
+            """,
+            (chat_id, status),
+        ).fetchall()
+    return [_row_to_task(row) for row in rows]
+
+
+def list_chat_ids_with_open_tasks(db_path: str) -> list[int]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT chat_id FROM tasks
+            WHERE status = 'open'
+            """
+        ).fetchall()
+    return [int(row["chat_id"]) for row in rows]
+
+
+def list_tasks_with_notion(db_path: str) -> list[Task]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM tasks
+            WHERE status = 'open' AND notion_page_id IS NOT NULL
+            """
+        ).fetchall()
+    return [_row_to_task(row) for row in rows]
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    existing = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if any(row[1] == column for row in existing):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
