@@ -13,6 +13,7 @@ class Settings:
     perplexity_api_key: str | None
     notion_token: str | None
     notion_db_id: str | None
+    notion_page_id: str | None
     allowed_user_ids: set[int]
     notion_prop_name: str
     notion_prop_status: str | None
@@ -33,6 +34,7 @@ def load_settings() -> Settings:
     perplexity_api_key = os.getenv("PERPLEXITY_API_KEY", "").strip() or None
     notion_token = os.getenv("NOTION_TOKEN", "").strip() or None
     notion_db_id = os.getenv("NOTION_DB_ID", "").strip() or None
+    notion_page_id = os.getenv("NOTION_PAGE_ID", "").strip() or None
 
     notion_prop_name = os.getenv("NOTION_PROP_NAME", "Name").strip() or "Name"
     notion_prop_status = os.getenv("NOTION_PROP_STATUS", "Status").strip() or None
@@ -51,8 +53,10 @@ def load_settings() -> Settings:
     if not allowed_user_ids:
         raise ValueError("ALLOWED_USER_IDS must contain at least one user id")
 
-    if not notion_token or not notion_db_id:
-        raise ValueError("NOTION_TOKEN and NOTION_DB_ID are required")
+    if not notion_token:
+        raise ValueError("NOTION_TOKEN is required")
+    if not notion_db_id and not notion_page_id:
+        raise ValueError("NOTION_DB_ID or NOTION_PAGE_ID is required")
 
     return Settings(
         bot_token=bot_token,
@@ -61,6 +65,7 @@ def load_settings() -> Settings:
         perplexity_api_key=perplexity_api_key,
         notion_token=notion_token,
         notion_db_id=notion_db_id,
+        notion_page_id=notion_page_id,
         allowed_user_ids=allowed_user_ids,
         notion_prop_name=notion_prop_name,
         notion_prop_status=notion_prop_status,

@@ -27,6 +27,7 @@ set BOT_TOKEN=ваш_токен
 set PERPLEXITY_API_KEY=ключ_если_есть
 set NOTION_TOKEN=токен_если_есть
 set NOTION_DB_ID=база_если_есть
+set NOTION_PAGE_ID=страница_если_есть
 set ALLOWED_USER_IDS=123456789,987654321
 python -m src.bot
 ```
@@ -43,6 +44,7 @@ BOT_TOKEN=ваш_токен
 PERPLEXITY_API_KEY=ключ_если_есть
 NOTION_TOKEN=токен_если_есть
 NOTION_DB_ID=база_если_есть
+NOTION_PAGE_ID=страница_если_есть
 BOT_TZ=Europe/Moscow
 ALLOWED_USER_IDS=123456789,987654321
 NOTION_PROP_NAME=Name
@@ -60,4 +62,5 @@ NOTION_PROP_REPEAT=Repeat
 - Часовой пояс фиксирован: Europe/Moscow (можно изменить через `BOT_TZ`)
 - Если напоминание не указано, бот не отправит уведомление
 - `NOTION_TOKEN`, `NOTION_DB_ID` и `ALLOWED_USER_IDS` обязательны для запуска
+- Нужен либо `NOTION_DB_ID`, либо `NOTION_PAGE_ID`
 - Если поля в базе Notion называются иначе, поменяй `NOTION_PROP_*`
