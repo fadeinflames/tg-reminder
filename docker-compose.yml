@@ -16,6 +16,8 @@ services:
       NOTION_STATUS_VALUE: ${NOTION_STATUS_VALUE:-Open}
       NOTION_PROP_DUE: ${NOTION_PROP_DUE:-Due}
       NOTION_PROP_REPEAT: ${NOTION_PROP_REPEAT:-Repeat}
+      NOTION_PROP_DONE: ${NOTION_PROP_DONE:-Done}
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-5}
     volumes:
       - tg-reminder-data:/data
 
