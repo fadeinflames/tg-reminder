@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 
 import requests
 
 from .config import Settings
 from .database import Task
 
+logger = logging.getLogger(__name__)
 
 def sync_task_created(settings: Settings, task: Task) -> None:
     if not settings.notion_token or not settings.notion_db_id:
@@ -15,17 +17,26 @@ def sync_task_created(settings: Settings, task: Task) -> None:
     payload = {
         "parent": {"database_id": settings.notion_db_id},
         "properties": {
-            "Name": {"title": [{"text": {"content": task.title}}]},
-            "Status": {"select": {"name": "Open"}},
+            settings.notion_prop_name: {
+                "title": [{"text": {"content": task.title}}]
+            },
         },
     }
-    if task.due_at:
-        payload["properties"]["Due"] = {"date": {"start": task.due_at.isoformat()}}
-    if task.repeat_rule:
-        payload["properties"]["Repeat"] = {"rich_text": [{"text": {"content": task.repeat_rule}}]}
+    if settings.notion_prop_status and settings.notion_status_value:
+        payload["properties"][settings.notion_prop_status] = {
+            "select": {"name": settings.notion_status_value}
+        }
+    if task.due_at and settings.notion_prop_due:
+        payload["properties"][settings.notion_prop_due] = {
+            "date": {"start": task.due_at.isoformat()}
+        }
+    if task.repeat_rule and settings.notion_prop_repeat:
+        payload["properties"][settings.notion_prop_repeat] = {
+            "rich_text": [{"text": {"content": task.repeat_rule}}]
+        }
 
     try:
-        requests.post(
+        response = requests.post(
             "https://api.notion.com/v1/pages",
             json=payload,
             headers={
@@ -35,8 +46,14 @@ def sync_task_created(settings: Settings, task: Task) -> None:
             },
             timeout=15,
         )
+        if response.status_code >= 400:
+            logger.error(
+                "Notion API error %s: %s",
+                response.status_code,
+                response.text,
+            )
     except Exception:
-        return
+        logger.exception("Notion API request failed")
 
 
 def format_date(value: datetime | None) -> str | None:

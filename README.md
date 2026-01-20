@@ -45,6 +45,11 @@ NOTION_TOKEN=токен_если_есть
 NOTION_DB_ID=база_если_есть
 BOT_TZ=Europe/Moscow
 ALLOWED_USER_IDS=123456789,987654321
+NOTION_PROP_NAME=Name
+NOTION_PROP_STATUS=Status
+NOTION_STATUS_VALUE=Open
+NOTION_PROP_DUE=Due
+NOTION_PROP_REPEAT=Repeat
 ```
 
 ## Примеры сообщений
@@ -55,3 +60,4 @@ ALLOWED_USER_IDS=123456789,987654321
 - Часовой пояс фиксирован: Europe/Moscow (можно изменить через `BOT_TZ`)
 - Если напоминание не указано, бот не отправит уведомление
 - `NOTION_TOKEN`, `NOTION_DB_ID` и `ALLOWED_USER_IDS` обязательны для запуска
+- Если поля в базе Notion называются иначе, поменяй `NOTION_PROP_*`

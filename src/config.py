@@ -14,6 +14,11 @@ class Settings:
     notion_token: str | None
     notion_db_id: str | None
     allowed_user_ids: set[int]
+    notion_prop_name: str
+    notion_prop_status: str | None
+    notion_prop_due: str | None
+    notion_prop_repeat: str | None
+    notion_status_value: str | None
 
 
 def load_settings() -> Settings:
@@ -28,6 +33,12 @@ def load_settings() -> Settings:
     perplexity_api_key = os.getenv("PERPLEXITY_API_KEY", "").strip() or None
     notion_token = os.getenv("NOTION_TOKEN", "").strip() or None
     notion_db_id = os.getenv("NOTION_DB_ID", "").strip() or None
+
+    notion_prop_name = os.getenv("NOTION_PROP_NAME", "Name").strip() or "Name"
+    notion_prop_status = os.getenv("NOTION_PROP_STATUS", "Status").strip() or None
+    notion_prop_due = os.getenv("NOTION_PROP_DUE", "Due").strip() or None
+    notion_prop_repeat = os.getenv("NOTION_PROP_REPEAT", "Repeat").strip() or None
+    notion_status_value = os.getenv("NOTION_STATUS_VALUE", "Open").strip() or None
 
     allowed_raw = os.getenv("ALLOWED_USER_IDS", "").strip()
     if not allowed_raw:
@@ -51,4 +62,9 @@ def load_settings() -> Settings:
         notion_token=notion_token,
         notion_db_id=notion_db_id,
         allowed_user_ids=allowed_user_ids,
+        notion_prop_name=notion_prop_name,
+        notion_prop_status=notion_prop_status,
+        notion_prop_due=notion_prop_due,
+        notion_prop_repeat=notion_prop_repeat,
+        notion_status_value=notion_status_value,
     )
