@@ -69,5 +69,6 @@ SYNC_INTERVAL_MINUTES=5
 - `NOTION_TOKEN`, `NOTION_DB_ID` и `ALLOWED_USER_IDS` обязательны для запуска
 - Нужен либо `NOTION_DB_ID`, либо `NOTION_PAGE_ID`
 - Для базы Notion чекбокс “Готово” задается через `NOTION_PROP_DONE`
+- Для `NOTION_PAGE_ID` задачи добавляются как пункты чек-листа прямо на странице
 - Если поля в базе Notion называются иначе, поменяй `NOTION_PROP_*`
 - Частоту синхронизации закрытия меняй через `SYNC_INTERVAL_MINUTES`

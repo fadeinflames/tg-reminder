@@ -16,7 +16,7 @@ from .database import (
     update_task_notion_id,
     update_task_status,
 )
-from .notion import archive_page, get_page, get_page_blocks, sync_task_created
+from .notion import archive_block, archive_page, get_block, get_page, sync_task_created
 from .parser import parse_task_text
 from .utils import format_dt
 
@@ -196,7 +196,11 @@ async def sync_closed_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not task.notion_page_id:
             continue
         if _is_task_closed_in_notion(settings, task.notion_page_id):
-            if archive_page(settings, task.notion_page_id):
+            if settings.notion_page_id:
+                archived = archive_block(settings, task.notion_page_id)
+            else:
+                archived = archive_page(settings, task.notion_page_id)
+            if archived:
                 update_task_status(db_path, task.id, "done", datetime.utcnow())
                 remove_reminder(context.application, task.id)
 
@@ -211,13 +215,13 @@ def _is_task_closed_in_notion(settings: Settings, page_id: str) -> bool:
             return False
         return bool(prop.get("checkbox"))
 
-    blocks = get_page_blocks(settings, page_id)
-    for block in blocks:
-        if block.get("type") == "to_do":
-            to_do = block.get("to_do", {})
-            if to_do.get("checked") is True:
-                return True
-    return False
+    block = get_block(settings, page_id)
+    if not block:
+        return False
+    if block.get("type") != "to_do":
+        return False
+    to_do = block.get("to_do", {})
+    return bool(to_do.get("checked"))
 
 
 async def on_startup(app: Application) -> None:

@@ -12,14 +12,14 @@ logger = logging.getLogger(__name__)
 
 def sync_task_created(settings: Settings, task: Task) -> str | None:
     if not settings.notion_token:
-        return
+        return None
 
     if settings.notion_db_id:
         payload = _build_database_payload(settings, task)
     elif settings.notion_page_id:
-        payload = _build_page_payload(settings, task)
+        return append_to_page(settings, settings.notion_page_id, task)
     else:
-        return
+        return None
 
     try:
         response = requests.post(
@@ -71,8 +71,8 @@ def _build_database_payload(settings: Settings, task: Task) -> dict:
     return payload
 
 
-def _build_page_payload(settings: Settings, task: Task) -> dict:
-    children = [
+def _build_page_children(task: Task) -> list[dict]:
+    return [
         {
             "object": "block",
             "type": "to_do",
@@ -103,13 +103,6 @@ def _build_page_payload(settings: Settings, task: Task) -> dict:
             ]},
         },
     ]
-    return {
-        "parent": {"page_id": settings.notion_page_id},
-        "properties": {
-            "title": {"title": [{"text": {"content": task.title}}]},
-        },
-        "children": children,
-    }
 
 
 def get_page(settings: Settings, page_id: str) -> dict | None:
@@ -132,10 +125,11 @@ def get_page(settings: Settings, page_id: str) -> dict | None:
         return None
 
 
-def get_page_blocks(settings: Settings, page_id: str) -> list[dict]:
+def append_to_page(settings: Settings, page_id: str, task: Task) -> str | None:
     try:
-        response = requests.get(
+        response = requests.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
+            json={"children": _build_page_children(task)},
             headers={
                 "Authorization": f"Bearer {settings.notion_token}",
                 "Notion-Version": "2022-06-28",
@@ -145,17 +139,61 @@ def get_page_blocks(settings: Settings, page_id: str) -> list[dict]:
         )
         if response.status_code >= 400:
             logger.error("Notion API error %s: %s", response.status_code, response.text)
-            return []
-        return response.json().get("results", [])
+            return None
+        results = response.json().get("results", [])
+        if results:
+            return results[0].get("id")
+        return None
     except Exception:
         logger.exception("Notion API request failed")
-        return []
+        return None
+
+
+def get_block(settings: Settings, block_id: str) -> dict | None:
+    try:
+        response = requests.get(
+            f"https://api.notion.com/v1/blocks/{block_id}",
+            headers={
+                "Authorization": f"Bearer {settings.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            logger.error("Notion API error %s: %s", response.status_code, response.text)
+            return None
+        return response.json()
+    except Exception:
+        logger.exception("Notion API request failed")
+        return None
 
 
 def archive_page(settings: Settings, page_id: str) -> bool:
     try:
         response = requests.patch(
             f"https://api.notion.com/v1/pages/{page_id}",
+            json={"archived": True},
+            headers={
+                "Authorization": f"Bearer {settings.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            logger.error("Notion API error %s: %s", response.status_code, response.text)
+            return False
+        return True
+    except Exception:
+        logger.exception("Notion API request failed")
+        return False
+
+
+def archive_block(settings: Settings, block_id: str) -> bool:
+    try:
+        response = requests.patch(
+            f"https://api.notion.com/v1/blocks/{block_id}",
             json={"archived": True},
             headers={
                 "Authorization": f"Bearer {settings.notion_token}",
