@@ -20,6 +20,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings: Settings = context.bot_data["settings"]
+    user = update.effective_user
+    if not user:
+        return False
+    return user.id in settings.allowed_user_ids
+
+
+async def _deny(update: Update) -> None:
+    if update.message:
+        await update.message.reply_text("Нет доступа.")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update, context):
         await _deny(update)
@@ -157,16 +170,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-def _is_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    settings: Settings = context.bot_data["settings"]
-    user = update.effective_user
-    if not user:
-        return False
-    return user.id in settings.allowed_user_ids
-
-
-async def _deny(update: Update) -> None:
-    if update.message:
-        await update.message.reply_text("Нет доступа.")
