@@ -1,0 +1,17 @@
+services:
+  tg-reminder:
+    build: .
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_TZ: ${BOT_TZ:-Europe/Moscow}
+      DB_PATH: /data/reminder.db
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-}
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_DB_ID: ${NOTION_DB_ID:-}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS}
+    volumes:
+      - tg-reminder-data:/data
+
+volumes:
+  tg-reminder-data:

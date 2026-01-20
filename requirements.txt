@@ -1,0 +1,4 @@
+python-telegram-bot==21.10
+requests==2.32.3
+dateparser==1.2.1
+python-dotenv==1.0.1
