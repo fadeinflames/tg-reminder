@@ -80,28 +80,7 @@ def _build_page_children(task: Task) -> list[dict]:
                 "checked": False,
                 "rich_text": [{"type": "text", "text": {"content": task.title}}],
             },
-        },
-        {
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [
-                {"type": "text", "text": {"content": f"Срок: {task.due_at.isoformat() if task.due_at else '—'}"}}
-            ]},
-        },
-        {
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [
-                {"type": "text", "text": {"content": f"Напоминание: {task.remind_at.isoformat() if task.remind_at else '—'}"}}
-            ]},
-        },
-        {
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [
-                {"type": "text", "text": {"content": f"Повтор: {task.repeat_rule or '—'}"}}
-            ]},
-        },
+        }
     ]
 
 

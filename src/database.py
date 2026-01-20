@@ -176,6 +176,31 @@ def update_task_remind_at(db_path: str, task_id: int, remind_at: datetime) -> No
         conn.commit()
 
 
+def update_task_fields(
+    db_path: str,
+    task_id: int,
+    *,
+    due_at: datetime | None,
+    remind_at: datetime | None,
+    repeat_rule: str | None,
+) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET due_at = ?, remind_at = ?, repeat_rule = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                _to_str(due_at),
+                _to_str(remind_at),
+                repeat_rule,
+                _to_str(datetime.utcnow()),
+                task_id,
+            ),
+        )
+        conn.commit()
+
+
 def update_task_notion_id(db_path: str, task_id: int, notion_page_id: str) -> None:
     with _connect(db_path) as conn:
         conn.execute(

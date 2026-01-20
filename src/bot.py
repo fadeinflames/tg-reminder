@@ -224,6 +224,8 @@ def _is_task_closed_in_notion(settings: Settings, page_id: str) -> bool:
     return bool(to_do.get("checked"))
 
 
+
+
 async def on_startup(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
     db_path: str = app.bot_data["db_path"]
