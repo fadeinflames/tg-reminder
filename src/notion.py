@@ -106,6 +106,11 @@ def get_page(settings: Settings, page_id: str) -> dict | None:
 
 def append_to_page(settings: Settings, page_id: str, task: Task) -> str | None:
     try:
+        block = get_block(settings, page_id)
+        if block and block.get("archived"):
+            if not unarchive_block(settings, page_id):
+                logger.error("Notion block is archived and cannot be unarchived: %s", page_id)
+                return None
         response = requests.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
             json={"children": _build_page_children(task)},
