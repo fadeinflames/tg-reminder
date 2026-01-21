@@ -109,6 +109,7 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
     db_path: str = context.bot_data["db_path"]
+    settings: Settings = context.bot_data["settings"]
     job_data = context.job.data or {}
     task_id = job_data.get("task_id")
     chat_id = job_data.get("chat_id")
@@ -117,6 +118,11 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
     task = get_task(db_path, task_id)
     if not task or task.status != "open":
         return
+    if task.notion_page_id and settings.notion_token:
+        if _is_task_closed_in_notion(settings, task.notion_page_id):
+            update_task_status(db_path, task.id, "done", datetime.utcnow())
+            remove_reminder(context.application, task.id)
+            return
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
