@@ -197,6 +197,38 @@ def list_page_children(settings: Settings, page_id: str) -> list[dict]:
         return blocks
 
 
+def query_database(settings: Settings, database_id: str) -> list[dict]:
+    pages: list[dict] = []
+    cursor: str | None = None
+    try:
+        while True:
+            payload: dict = {"page_size": 100}
+            if cursor:
+                payload["start_cursor"] = cursor
+            response = requests.post(
+                f"https://api.notion.com/v1/databases/{database_id}/query",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {settings.notion_token}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
+            )
+            if response.status_code >= 400:
+                logger.error("Notion API error %s: %s", response.status_code, response.text)
+                return pages
+            payload = response.json()
+            pages.extend(payload.get("results", []))
+            if not payload.get("has_more"):
+                break
+            cursor = payload.get("next_cursor")
+        return pages
+    except Exception:
+        logger.exception("Notion API request failed")
+        return pages
+
+
 def archive_page(settings: Settings, page_id: str) -> bool:
     try:
         response = requests.patch(

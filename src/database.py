@@ -225,6 +225,18 @@ def update_task_title(db_path: str, task_id: int, title: str) -> None:
         conn.commit()
 
 
+def update_task_due_at(db_path: str, task_id: int, due_at: datetime | None) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET due_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (_to_str(due_at), _to_str(datetime.utcnow()), task_id),
+        )
+        conn.commit()
+
+
 def list_future_reminders(db_path: str, now: datetime) -> list[Task]:
     with _connect(db_path) as conn:
         rows = conn.execute(
