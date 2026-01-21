@@ -181,11 +181,10 @@ def archive_page(settings: Settings, page_id: str) -> bool:
         return False
 
 
-def archive_block(settings: Settings, block_id: str) -> bool:
+def delete_block(settings: Settings, block_id: str) -> bool:
     try:
-        response = requests.patch(
+        response = requests.delete(
             f"https://api.notion.com/v1/blocks/{block_id}",
-            json={"archived": True},
             headers={
                 "Authorization": f"Bearer {settings.notion_token}",
                 "Notion-Version": "2022-06-28",

@@ -16,7 +16,7 @@ from .database import (
     update_task_notion_id,
     update_task_status,
 )
-from .notion import archive_block, archive_page, get_block, get_page, sync_task_created
+from .notion import delete_block, archive_page, get_block, get_page, sync_task_created
 from .parser import parse_task_text
 from .utils import format_dt
 
@@ -232,7 +232,7 @@ async def sync_closed_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
         if _is_task_closed_in_notion(settings, task.notion_page_id):
             if settings.notion_page_id:
-                archived = archive_block(settings, task.notion_page_id)
+                archived = delete_block(settings, task.notion_page_id)
             else:
                 archived = archive_page(settings, task.notion_page_id)
             if archived:
