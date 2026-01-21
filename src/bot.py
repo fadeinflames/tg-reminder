@@ -13,10 +13,19 @@ from .database import (
     list_chat_ids_with_open_tasks,
     list_tasks_for_chat,
     list_tasks_with_notion,
+    list_tasks_with_notion_all,
     update_task_notion_id,
     update_task_status,
+    update_task_title,
 )
-from .notion import delete_block, archive_page, get_block, get_page, sync_task_created
+from .notion import (
+    archive_page,
+    delete_block,
+    get_block,
+    get_page,
+    list_page_children,
+    sync_task_created,
+)
 from .parser import parse_task_text
 from .utils import format_dt
 
@@ -85,6 +94,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    await sync_tasks_from_notion(context)
     await sync_closed_tasks(context)
     await update.message.reply_text("✅ Синхронизация завершена.")
 
@@ -238,6 +248,53 @@ async def sync_closed_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
             if archived:
                 update_task_status(db_path, task.id, "done", datetime.utcnow())
                 remove_reminder(context.application, task.id)
+
+
+async def sync_tasks_from_notion(context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    db_path: str = context.bot_data["db_path"]
+    if not settings.notion_token or not settings.notion_page_id:
+        return
+    blocks = list_page_children(settings, settings.notion_page_id)
+    todo_blocks = {
+        block.get("id"): block
+        for block in blocks
+        if block.get("type") == "to_do"
+    }
+    now = datetime.now(settings.tz)
+    for task in list_tasks_with_notion_all(db_path):
+        if not task.notion_page_id:
+            continue
+        block = todo_blocks.get(task.notion_page_id)
+        if not block:
+            if task.status != "done":
+                update_task_status(db_path, task.id, "done", datetime.utcnow())
+                remove_reminder(context.application, task.id)
+            continue
+        todo = block.get("to_do", {})
+        checked = bool(todo.get("checked"))
+        status = "done" if checked else "open"
+        if task.status != status:
+            update_task_status(db_path, task.id, status, datetime.utcnow())
+            if status == "done":
+                remove_reminder(context.application, task.id)
+            elif task.remind_at and task.remind_at > now:
+                schedule_reminder(context.application, task)
+        title = _extract_todo_title(todo)
+        if title and title != task.title:
+            update_task_title(db_path, task.id, title)
+
+
+def _extract_todo_title(todo: dict) -> str:
+    parts = []
+    for item in todo.get("rich_text", []) or []:
+        if "plain_text" in item:
+            parts.append(item["plain_text"])
+        else:
+            text = item.get("text", {}).get("content")
+            if text:
+                parts.append(text)
+    return " ".join(" ".join(parts).split()).strip()
 
 
 def _is_task_closed_in_notion(settings: Settings, page_id: str) -> bool:

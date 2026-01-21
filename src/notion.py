@@ -160,6 +160,38 @@ def get_block(settings: Settings, block_id: str) -> dict | None:
         return None
 
 
+def list_page_children(settings: Settings, page_id: str) -> list[dict]:
+    blocks: list[dict] = []
+    cursor: str | None = None
+    try:
+        while True:
+            params = {"page_size": 100}
+            if cursor:
+                params["start_cursor"] = cursor
+            response = requests.get(
+                f"https://api.notion.com/v1/blocks/{page_id}/children",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {settings.notion_token}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
+            )
+            if response.status_code >= 400:
+                logger.error("Notion API error %s: %s", response.status_code, response.text)
+                return blocks
+            payload = response.json()
+            blocks.extend(payload.get("results", []))
+            if not payload.get("has_more"):
+                break
+            cursor = payload.get("next_cursor")
+        return blocks
+    except Exception:
+        logger.exception("Notion API request failed")
+        return blocks
+
+
 def archive_page(settings: Settings, page_id: str) -> bool:
     try:
         response = requests.patch(
