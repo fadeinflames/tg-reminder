@@ -58,8 +58,34 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "Просто отправь сообщение, и оно станет задачей в Notion.\n"
         "Пример: Созвон с клиентом завтра 15:00 напомни за 1 час\n"
-        "Повторы: ежедневно, еженедельно, каждые 3 дня"
+        "Повторы: ежедневно, еженедельно, каждые 3 дня\n"
+        "Команды: /list (список), /sync (синхронизация)"
     )
+
+
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    db_path: str = context.bot_data["db_path"]
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+    if not tasks:
+        await update.message.reply_text("Открытых задач нет.")
+        return
+    lines = [f"📋 Открытые задачи ({len(tasks)}):"]
+    lines.extend(_format_task_lines(tasks))
+    await update.message.reply_text("\n".join(lines))
+
+
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    await sync_closed_tasks(context)
+    await update.message.reply_text("✅ Синхронизация завершена.")
 
 
 async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,6 +304,8 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list", list_command))
+    application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, capture_message)
     )
