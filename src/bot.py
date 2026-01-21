@@ -10,9 +10,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from .config import Settings, load_settings
 from .database import Task, create_task, get_task, init_db, list_future_reminders
 from .database import (
+    clear_tasks,
     list_chat_ids_with_open_tasks,
     list_tasks_for_chat,
-    list_tasks_with_notion,
     list_tasks_with_notion_all,
     update_task_due_at,
     update_task_notion_id,
@@ -21,7 +21,6 @@ from .database import (
 )
 from .notion import (
     archive_page,
-    delete_block,
     get_block,
     get_page,
     list_page_children,
@@ -55,6 +54,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    _remember_chat(update, context)
     await update.message.reply_text(
         "Привет! Я бот напоминаний.\n"
         "Просто напиши задачу обычным сообщением.\n"
@@ -66,6 +66,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    _remember_chat(update, context)
     await update.message.reply_text(
         "Просто отправь сообщение, и оно станет задачей в Notion.\n"
         "Пример: Созвон с клиентом завтра 15:00 напомни за 1 час\n"
@@ -78,11 +79,11 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    _remember_chat(update, context)
     db_path: str = context.bot_data["db_path"]
     chat_id = update.effective_chat.id if update.effective_chat else None
     user_id = update.effective_user.id if update.effective_user else None
-    await sync_tasks_from_notion(context, chat_id=chat_id, user_id=user_id)
-    await sync_closed_tasks(context)
+    await sync_tasks_from_notion(context, chat_id=chat_id, user_id=user_id, reset=True)
     if not chat_id:
         return
     tasks = list_tasks_for_chat(db_path, chat_id, status="open")
@@ -98,10 +99,10 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    _remember_chat(update, context)
     chat_id = update.effective_chat.id if update.effective_chat else None
     user_id = update.effective_user.id if update.effective_user else None
-    await sync_tasks_from_notion(context, chat_id=chat_id, user_id=user_id)
-    await sync_closed_tasks(context)
+    await sync_tasks_from_notion(context, chat_id=chat_id, user_id=user_id, reset=True)
     await update.message.reply_text("✅ Синхронизация завершена.")
 
 
@@ -109,6 +110,7 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    _remember_chat(update, context)
     if update.effective_user and update.effective_user.is_bot:
         return
     settings: Settings = context.bot_data["settings"]
@@ -241,7 +243,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def sync_closed_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
-    await sync_tasks_from_notion(context)
+    await sync_tasks_from_notion(context, reset=True)
 
 
 async def sync_tasks_from_notion(
@@ -249,11 +251,19 @@ async def sync_tasks_from_notion(
     *,
     chat_id: int | None = None,
     user_id: int | None = None,
+    reset: bool = False,
 ) -> None:
     settings: Settings = context.bot_data["settings"]
     db_path: str = context.bot_data["db_path"]
     if not settings.notion_token:
         return
+    chat_id, user_id = _resolve_primary_ids(context, chat_id, user_id)
+    if reset:
+        if not chat_id or not user_id:
+            logger.warning("Skip sync reset: chat_id or user_id is missing")
+            return
+        _remove_all_reminders(context.application)
+        clear_tasks(db_path)
     tasks_by_notion = {
         task.notion_page_id: task
         for task in list_tasks_with_notion_all(db_path)
@@ -277,8 +287,6 @@ async def sync_tasks_from_notion(
             status = "done" if done else "open"
             task = tasks_by_notion.get(page_id)
             if not task:
-                if not (chat_id and user_id):
-                    continue
                 new_task = Task(
                     id=None,
                     user_id=user_id,
@@ -293,11 +301,8 @@ async def sync_tasks_from_notion(
                     created_at=now,
                     updated_at=now,
                 )
-                task_id = create_task(db_path, new_task)
-                if status == "open" and new_task.remind_at:
-                    schedule_reminder(context.application, new_task)
-                if task_id:
-                    continue
+                create_task(db_path, new_task)
+                continue
             else:
                 if task.status != status:
                     update_task_status(db_path, task.id, status, datetime.utcnow())
@@ -329,8 +334,6 @@ async def sync_tasks_from_notion(
         title = _extract_todo_title(todo)
         task = tasks_by_notion.get(block_id)
         if not task:
-            if not (chat_id and user_id):
-                continue
             new_task = Task(
                 id=None,
                 user_id=user_id,
@@ -367,6 +370,31 @@ def _extract_todo_title(todo: dict) -> str:
             if text:
                 parts.append(text)
     return " ".join(" ".join(parts).split()).strip()
+
+
+def _remember_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat:
+        context.bot_data["primary_chat_id"] = update.effective_chat.id
+    if update.effective_user:
+        context.bot_data["primary_user_id"] = update.effective_user.id
+
+
+def _resolve_primary_ids(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+    user_id: int | None,
+) -> tuple[int | None, int | None]:
+    if not chat_id:
+        chat_id = context.bot_data.get("primary_chat_id")
+    if not user_id:
+        user_id = context.bot_data.get("primary_user_id")
+    return chat_id, user_id
+
+
+def _remove_all_reminders(app: Application) -> None:
+    for job in list(app.job_queue.jobs()):
+        if job.name and job.name.startswith("remind_"):
+            job.schedule_removal()
 
 
 def _extract_page_title(page: dict, settings: Settings) -> str:
@@ -448,6 +476,11 @@ async def on_startup(app: Application) -> None:
             daily_summary,
             time(hour=hour, minute=0, tzinfo=settings.tz),
             name=f"daily_summary_{hour}",
+        )
+        app.job_queue.run_daily(
+            sync_closed_tasks,
+            time(hour=hour, minute=0, tzinfo=settings.tz),
+            name=f"sync_full_{hour}",
         )
     app.job_queue.run_repeating(
         sync_closed_tasks,

@@ -307,6 +307,12 @@ def list_tasks_with_notion_all(db_path: str) -> list[Task]:
     return [_row_to_task(row) for row in rows]
 
 
+def clear_tasks(db_path: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM tasks")
+        conn.commit()
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
     existing = conn.execute(f"PRAGMA table_info({table})").fetchall()
     if any(row[1] == column for row in existing):
