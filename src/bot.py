@@ -68,6 +68,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _deny(update)
         return
     db_path: str = context.bot_data["db_path"]
+    await sync_closed_tasks(context)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
@@ -91,6 +92,8 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update, context):
         await _deny(update)
+        return
+    if update.effective_user and update.effective_user.is_bot:
         return
     settings: Settings = context.bot_data["settings"]
     db_path: str = context.bot_data["db_path"]
@@ -281,8 +284,9 @@ async def on_startup(app: Application) -> None:
 def _format_task_lines(tasks: list[Task]) -> list[str]:
     lines = []
     for task in tasks:
+        title = " ".join(task.title.split())
         lines.append(
-            f"• {task.title} | срок: {format_dt(task.due_at)} | "
+            f"• {title} | срок: {format_dt(task.due_at)} | "
             f"напомнить: {format_dt(task.remind_at)}"
         )
     return lines
