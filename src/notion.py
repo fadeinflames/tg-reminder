@@ -116,6 +116,18 @@ def append_to_page(settings: Settings, page_id: str, task: Task) -> str | None:
             },
             timeout=15,
         )
+        if response.status_code == 400 and "archived" in response.text.lower():
+            if unarchive_block(settings, page_id):
+                response = requests.patch(
+                    f"https://api.notion.com/v1/blocks/{page_id}/children",
+                    json={"children": _build_page_children(task)},
+                    headers={
+                        "Authorization": f"Bearer {settings.notion_token}",
+                        "Notion-Version": "2022-06-28",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=15,
+                )
         if response.status_code >= 400:
             logger.error("Notion API error %s: %s", response.status_code, response.text)
             return None
@@ -174,6 +186,27 @@ def archive_block(settings: Settings, block_id: str) -> bool:
         response = requests.patch(
             f"https://api.notion.com/v1/blocks/{block_id}",
             json={"archived": True},
+            headers={
+                "Authorization": f"Bearer {settings.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            logger.error("Notion API error %s: %s", response.status_code, response.text)
+            return False
+        return True
+    except Exception:
+        logger.exception("Notion API request failed")
+        return False
+
+
+def unarchive_block(settings: Settings, block_id: str) -> bool:
+    try:
+        response = requests.patch(
+            f"https://api.notion.com/v1/blocks/{block_id}",
+            json={"archived": False},
             headers={
                 "Authorization": f"Bearer {settings.notion_token}",
                 "Notion-Version": "2022-06-28",
