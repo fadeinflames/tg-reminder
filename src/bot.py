@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import datetime, time
 
 from dotenv import load_dotenv
+import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -68,7 +71,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Просто отправь сообщение, и оно станет задачей.\n"
         "Пример: Созвон с клиентом завтра 15:00 напомни за 1 час\n"
         "Повторы: ежедневно, еженедельно, каждые 3 дня\n"
-        "Команды: /list, /done <id>, /delete <id>, /sync"
+        "Команды: /list, /done <id>, /delete <id>, /sync, /cleanup"
     )
 
 
@@ -197,6 +200,30 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("🗑️ Задача удалена.")
         return
     await update.message.reply_text("Не удалось удалить задачу.")
+
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    db_path: str = context.bot_data["db_path"]
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    raw = (update.message.text or "").strip()
+    settings: Settings = context.bot_data["settings"]
+    keep_lines = _extract_keep_lines(raw)
+    if not keep_lines and settings.perplexity_api_key:
+        keep_lines = _extract_keep_lines_with_perplexity(raw, settings)
+    if keep_lines:
+        removed = _cleanup_tasks(db_path, chat_id, keep_lines)
+        await update.message.reply_text(f"🧹 Удалено задач: {removed}")
+        await _send_task_list(context, chat_id, db_path)
+        return
+    context.user_data["pending_action"] = {"type": "cleanup_keep", "chat_id": chat_id}
+    await update.message.reply_text(
+        "Пришли список задач, которые нужно оставить (по одной на строку)."
+    )
 
 
 async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -492,6 +519,16 @@ async def _handle_pending_action(
         context.user_data.pop("pending_action", None)
         await update.message.reply_text("Задача не найдена.")
         return
+    if action_type == "cleanup_keep":
+        keep_lines = _extract_keep_lines(text)
+        if not keep_lines and settings.perplexity_api_key:
+            keep_lines = _extract_keep_lines_with_perplexity(text, settings)
+        removed = _cleanup_tasks(db_path, pending.get("chat_id"), keep_lines)
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text(f"🧹 Удалено задач: {removed}")
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, db_path)
+        return
     if action_type == "edit_text":
         clean = " ".join(text.split())
         if not clean:
@@ -549,6 +586,99 @@ def _parse_user_datetime(text: str, settings: Settings, now: datetime) -> dateti
     return parsed if parsed and parsed > now else None
 
 
+def _extract_keep_lines(text: str) -> list[str]:
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("/cleanup"):
+            line = line[len("/cleanup") :].strip()
+        line = re.sub(r"^[•\-–\*]+\s*", "", line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _normalize_title(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def _cleanup_tasks(db_path: str, chat_id: int, keep_lines: list[str]) -> int:
+    if not keep_lines:
+        return 0
+    keep_norm = [_normalize_title(line) for line in keep_lines]
+    removed = 0
+    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+    for task in tasks:
+        title_norm = _normalize_title(task.title)
+        keep = any(
+            title_norm in keep_item or keep_item in title_norm for keep_item in keep_norm
+        )
+        if not keep:
+            if delete_task(db_path, task.id, task.user_id):
+                removed += 1
+    return removed
+
+
+def _extract_keep_lines_with_perplexity(text: str, settings: Settings) -> list[str]:
+    prompt = (
+        "Ты помощник для управления задачами. Из текста пользователя извлеки список задач, "
+        "которые НУЖНО ОСТАВИТЬ. Верни ТОЛЬКО JSON массив строк.\n"
+        "Правила:\n"
+        "- Если перечисление через точки/буллеты — возьми каждую строку.\n"
+        "- Если фраза 'удали все кроме ...' — верни элементы после 'кроме'.\n"
+        "- Нормализуй пробелы, не меняй смысл.\n"
+        f"Текст: {text}\n"
+        "JSON:"
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.perplexity_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "sonar",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+    }
+    try:
+        response = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        data = _safe_json_array(content)
+        if not data:
+            logger.warning("Perplexity cleanup parse failed, content=%r", content[:500])
+            return []
+        return [_normalize_title(item) for item in data if isinstance(item, str) and item.strip()]
+    except Exception:
+        logger.exception("Perplexity cleanup request failed")
+        return []
+
+
+def _safe_json_array(content: str) -> list[str] | None:
+    try:
+        data = json.loads(content)
+        return data if isinstance(data, list) else None
+    except Exception:
+        pass
+    if "[" in content and "]" in content:
+        start = content.find("[")
+        end = content.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            snippet = content[start : end + 1]
+            try:
+                data = json.loads(snippet)
+                return data if isinstance(data, list) else None
+            except Exception:
+                return None
+    return None
+
+
 def main() -> None:
     load_dotenv()
     settings = load_settings()
@@ -568,6 +698,7 @@ def main() -> None:
     application.add_handler(CommandHandler("list", list_command))
     application.add_handler(CommandHandler("done", done_command))
     application.add_handler(CommandHandler("delete", delete_command))
+    application.add_handler(CommandHandler("cleanup", cleanup_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CallbackQueryHandler(done_callback))
     application.add_handler(
