@@ -109,7 +109,10 @@ def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> Pars
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
-        data = json.loads(content)
+        data = _safe_json_loads(content)
+        if data is None:
+            logger.warning("Perplexity returned non-JSON: %r", content[:500])
+            return None
     except Exception:
         logger.exception("Perplexity request failed")
         return None
@@ -320,6 +323,23 @@ def _normalize_repeat(value: Any) -> str | None:
         if value in {"none", "null"}:
             return None
         return value
+    return None
+
+
+def _safe_json_loads(content: str) -> dict | None:
+    try:
+        return json.loads(content)
+    except Exception:
+        pass
+    if "{" in content and "}" in content:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            snippet = content[start : end + 1]
+            try:
+                return json.loads(snippet)
+            except Exception:
+                return None
     return None
 
 
