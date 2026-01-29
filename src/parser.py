@@ -111,6 +111,7 @@ def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> Pars
         content = response.json()["choices"][0]["message"]["content"]
         data = json.loads(content)
     except Exception:
+        logger.exception("Perplexity request failed")
         return None
 
     try:
@@ -122,6 +123,7 @@ def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> Pars
             repeat_rule=_normalize_repeat(data.get("repeat_rule")),
         )
     except Exception:
+        logger.exception("Perplexity response parse failed")
         return None
 
 
