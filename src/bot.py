@@ -211,6 +211,11 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     action, task_id_text = _parse_callback(query.data)
     if not action:
         return
+    if action == "back":
+        await _finalize_callback(query, "Ок")
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, context.bot_data["db_path"])
+        return
     if not task_id_text.isdigit():
         await query.answer("Некорректный id", show_alert=True)
         return
@@ -252,9 +257,6 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             await _finalize_callback(query, "Не удалось удалить задачу.")
         return
-    if action == "back":
-        if update.effective_chat:
-            await _send_task_list(context, update.effective_chat.id, db_path)
 
 
 def schedule_reminder(app: Application, task: Task) -> None:
@@ -356,21 +358,22 @@ def _format_task_lines(tasks: list[Task]) -> list[str]:
     lines = []
     for task in tasks:
         title = " ".join(task.title.split())
-        lines.append(
-            f"• {title} | срок: {format_dt(task.due_at)} | "
-            f"напомнить: {format_dt(task.remind_at)}"
-        )
+        parts = [f"• {title}"]
+        if task.due_at:
+            parts.append(f"срок: {format_dt(task.due_at)}")
+        if task.remind_at:
+            parts.append(f"напомнить: {format_dt(task.remind_at)}")
+        lines.append(" | ".join(parts))
     return lines
 
 
-def _build_done_keyboard(tasks: list[Task]) -> list[list[InlineKeyboardButton]]:
+def _build_list_keyboard(tasks: list[Task]) -> list[list[InlineKeyboardButton]]:
     keyboard: list[list[InlineKeyboardButton]] = []
     for task in tasks:
         title = " ".join(task.title.split())
         label = title if len(title) <= 40 else f"{title[:37]}..."
         keyboard.append(
             [
-                InlineKeyboardButton("✅", callback_data=f"done:{task.id}"),
                 InlineKeyboardButton(f"📝 {label}", callback_data=f"open:{task.id}"),
             ]
         )
@@ -437,7 +440,7 @@ async def _send_task_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int, db_p
         return
     lines = [f"📋 Открытые задачи ({len(tasks)}):"]
     lines.extend(_format_task_lines(tasks))
-    keyboard = _build_done_keyboard(tasks)
+    keyboard = _build_list_keyboard(tasks)
     await context.bot.send_message(
         chat_id=chat_id,
         text="\n".join(lines),
@@ -446,13 +449,14 @@ async def _send_task_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int, db_p
 
 
 async def _send_task_detail(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task: Task) -> None:
-    text = (
-        f"📝 Задача #{task.id}\n"
-        f"{task.title}\n"
-        f"Срок: {format_dt(task.due_at)}\n"
-        f"Напоминание: {format_dt(task.remind_at)}\n"
-        f"Повтор: {task.repeat_rule or '—'}"
-    )
+    lines = [f"📝 Задача #{task.id}", task.title]
+    if task.due_at:
+        lines.append(f"Срок: {format_dt(task.due_at)}")
+    if task.remind_at:
+        lines.append(f"Напоминание: {format_dt(task.remind_at)}")
+    if task.repeat_rule:
+        lines.append(f"Повтор: {task.repeat_rule}")
+    text = "\n".join(lines)
     keyboard = InlineKeyboardMarkup(
         [
             [
