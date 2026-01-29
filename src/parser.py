@@ -32,6 +32,12 @@ _RE_DURATION_PART = re.compile(
     r"(\d+)\s*(минут|мин|час|часа|часов|день|дня|дней|неделю|недели|недель)",
     re.IGNORECASE,
 )
+_RE_DATE_HINT = re.compile(
+    r"(\b\d{1,2}[.:]\d{2}\b|\b\d{1,2}\b|\bсегодня\b|\bзавтра\b|\bпослезавтра\b|"
+    r"\bпонедельник\b|\bвторник\b|\bсреда\b|\bчетверг\b|\bпятница\b|\bсуббота\b|\bвоскресенье\b|"
+    r"\bутра\b|\bднем\b|\bвечером\b|\bночью\b)",
+    re.IGNORECASE,
+)
 _RE_REPEAT_DAILY = re.compile(r"(каждый день|ежедневно)", re.IGNORECASE)
 _RE_REPEAT_WEEKLY = re.compile(r"(каждую неделю|еженедельно)", re.IGNORECASE)
 _RE_REPEAT_MONTHLY = re.compile(r"(каждый месяц|ежемесячно)", re.IGNORECASE)
@@ -114,6 +120,8 @@ def _parse_fallback(text: str, now: datetime, settings: Settings) -> ParsedTask:
     remind_at = _extract_remind_at(text, now, settings, due_at)
     if remind_at and not due_at:
         due_at = remind_at
+    if not remind_at and due_at and "напомни" in text.lower():
+        remind_at = due_at
     repeat_rule = _extract_repeat_rule(text)
     title = _cleanup_title(text)
 
@@ -127,6 +135,19 @@ def _parse_fallback(text: str, now: datetime, settings: Settings) -> ParsedTask:
 
 
 def _extract_due_date(text: str, now: datetime, settings: Settings) -> datetime | None:
+    if _RE_DATE_HINT.search(text):
+        parsed = dateparser.parse(
+            text,
+            languages=["ru"],
+            settings={
+                "RELATIVE_BASE": now,
+                "TIMEZONE": str(settings.tz),
+                "RETURN_AS_TIMEZONE_AWARE": True,
+                "PREFER_DATES_FROM": "future",
+            },
+        )
+        if parsed and parsed > now:
+            return parsed
     matches = search_dates(
         text,
         languages=["ru"],
@@ -138,7 +159,17 @@ def _extract_due_date(text: str, now: datetime, settings: Settings) -> datetime 
         },
     )
     if matches:
-        return matches[0][1]
+        candidates = []
+        for matched_text, dt in matches:
+            if dt <= now:
+                continue
+            has_time = bool(
+                re.search(r"\d{1,2}[.:]\d{2}|\b(утра|днем|вечером|ночью)\b", matched_text, re.IGNORECASE)
+            )
+            candidates.append((has_time, dt))
+        if candidates:
+            candidates.sort(key=lambda item: (not item[0], item[1]))
+            return candidates[0][1]
     return None
 
 
