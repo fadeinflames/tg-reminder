@@ -4,8 +4,15 @@ import logging
 from datetime import datetime, time
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from .config import Settings, load_settings
 from .database import Task, create_task, delete_task, get_task, init_db, list_future_reminders
@@ -75,7 +82,11 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     lines = [f"📋 Открытые задачи ({len(tasks)}):"]
     lines.extend(_format_task_lines(tasks))
-    await update.message.reply_text("\n".join(lines))
+    keyboard = _build_done_keyboard(tasks)
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+    )
 
 
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -166,35 +177,8 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not task:
         await update.message.reply_text("Задача не найдена.")
         return
-    now = datetime.now(settings.tz)
-    next_due = next_due_date(task.due_at, task.repeat_rule)
-    if task.repeat_rule and next_due:
-        remove_reminder(context.application, task.id)
-        new_remind = None
-        if task.remind_at and task.due_at and task.remind_at < task.due_at:
-            offset = task.due_at - task.remind_at
-            candidate = next_due - offset
-            if candidate > now:
-                new_remind = candidate
-        update_task_fields(
-            db_path,
-            task.id,
-            due_at=next_due,
-            remind_at=new_remind,
-            repeat_rule=task.repeat_rule,
-        )
-        update_task_status(db_path, task.id, "open", datetime.utcnow())
-        if new_remind:
-            task.due_at = next_due
-            task.remind_at = new_remind
-            schedule_reminder(context.application, task)
-        await update.message.reply_text(
-            f"✅ Повтор перенесён на {format_dt(next_due)}"
-        )
-        return
-    update_task_status(db_path, task.id, "done", datetime.utcnow())
-    remove_reminder(context.application, task.id)
-    await update.message.reply_text("✅ Задача отмечена выполненной.")
+    message = _complete_task(task, context, settings, db_path)
+    await update.message.reply_text(message)
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,6 +199,32 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("🗑️ Задача удалена.")
         return
     await update.message.reply_text("Не удалось удалить задачу.")
+
+
+async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    if not query.data.startswith("done:"):
+        return
+    task_id_text = query.data.split(":", 1)[1]
+    if not task_id_text.isdigit():
+        await query.answer("Некорректный id", show_alert=True)
+        return
+    task_id = int(task_id_text)
+    db_path: str = context.bot_data["db_path"]
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    task = get_task(db_path, task_id, user_id)
+    if not task:
+        await query.answer("Задача не найдена", show_alert=True)
+        return
+    message = _complete_task(task, context, settings, db_path)
+    await query.answer("Готово")
+    await query.edit_message_text(message)
 
 
 def schedule_reminder(app: Application, task: Task) -> None:
@@ -323,6 +333,49 @@ def _format_task_lines(tasks: list[Task]) -> list[str]:
     return lines
 
 
+def _build_done_keyboard(tasks: list[Task]) -> list[list[InlineKeyboardButton]]:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for task in tasks:
+        title = " ".join(task.title.split())
+        label = title if len(title) <= 40 else f"{title[:37]}..."
+        keyboard.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{task.id}")])
+    return keyboard
+
+
+def _complete_task(
+    task: Task,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings: Settings,
+    db_path: str,
+) -> str:
+    now = datetime.now(settings.tz)
+    next_due = next_due_date(task.due_at, task.repeat_rule)
+    if task.repeat_rule and next_due:
+        remove_reminder(context.application, task.id)
+        new_remind = None
+        if task.remind_at and task.due_at and task.remind_at < task.due_at:
+            offset = task.due_at - task.remind_at
+            candidate = next_due - offset
+            if candidate > now:
+                new_remind = candidate
+        update_task_fields(
+            db_path,
+            task.id,
+            due_at=next_due,
+            remind_at=new_remind,
+            repeat_rule=task.repeat_rule,
+        )
+        update_task_status(db_path, task.id, "open", datetime.utcnow())
+        if new_remind:
+            task.due_at = next_due
+            task.remind_at = new_remind
+            schedule_reminder(context.application, task)
+        return f"✅ Повтор перенесён на {format_dt(next_due)}"
+    update_task_status(db_path, task.id, "done", datetime.utcnow())
+    remove_reminder(context.application, task.id)
+    return "✅ Задача отмечена выполненной."
+
+
 def main() -> None:
     load_dotenv()
     settings = load_settings()
@@ -343,6 +396,7 @@ def main() -> None:
     application.add_handler(CommandHandler("done", done_command))
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("sync", sync_command))
+    application.add_handler(CallbackQueryHandler(done_callback, pattern="^done:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, capture_message)
     )
