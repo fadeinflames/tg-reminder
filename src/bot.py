@@ -206,12 +206,13 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     if not query or not query.data:
         return
+    logger.info("Callback received: %s", query.data)
     if not _is_allowed(update, context):
         await query.answer("Нет доступа", show_alert=True)
         return
+    await query.answer("Ок")
     if not query.data.startswith("done:"):
         return
-    await query.answer("Ок")
     task_id_text = query.data.split(":", 1)[1]
     if not task_id_text.isdigit():
         await query.answer("Некорректный id", show_alert=True)
@@ -226,7 +227,8 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     message = _complete_task(task, context, settings, db_path)
     try:
-        await query.edit_message_text(message)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(message)
     except TelegramError:
         logger.exception("Failed to edit message after done callback")
         if query.message:
@@ -402,7 +404,7 @@ def main() -> None:
     application.add_handler(CommandHandler("done", done_command))
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("sync", sync_command))
-    application.add_handler(CallbackQueryHandler(done_callback, pattern="^done:"))
+    application.add_handler(CallbackQueryHandler(done_callback))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, capture_message)
     )
