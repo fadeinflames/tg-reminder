@@ -27,6 +27,11 @@ _RE_REMIND_OFFSET = re.compile(
     re.IGNORECASE,
 )
 _RE_REMIND_AT = re.compile(r"напомни(?:ть)?\s+в\s+(.+)$", re.IGNORECASE)
+_RE_REMIND_IN = re.compile(r"напомни(?:ть)?\s+через\s+(.+)$", re.IGNORECASE)
+_RE_DURATION_PART = re.compile(
+    r"(\d+)\s*(минут|мин|час|часа|часов|день|дня|дней|неделю|недели|недель)",
+    re.IGNORECASE,
+)
 _RE_REPEAT_DAILY = re.compile(r"(каждый день|ежедневно)", re.IGNORECASE)
 _RE_REPEAT_WEEKLY = re.compile(r"(каждую неделю|еженедельно)", re.IGNORECASE)
 _RE_REPEAT_MONTHLY = re.compile(r"(каждый месяц|ежемесячно)", re.IGNORECASE)
@@ -93,6 +98,8 @@ def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> Pars
 def _parse_fallback(text: str, now: datetime, settings: Settings) -> ParsedTask:
     due_at = _extract_due_date(text, now, settings)
     remind_at = _extract_remind_at(text, now, settings, due_at)
+    if remind_at and not due_at:
+        due_at = remind_at
     repeat_rule = _extract_repeat_rule(text)
     title = _cleanup_title(text)
 
@@ -124,6 +131,14 @@ def _extract_due_date(text: str, now: datetime, settings: Settings) -> datetime 
 def _extract_remind_at(
     text: str, now: datetime, settings: Settings, due_at: datetime | None
 ) -> datetime | None:
+    in_match = _RE_REMIND_IN.search(text)
+    if in_match:
+        delta = timedelta()
+        for amount_text, unit in _RE_DURATION_PART.findall(in_match.group(1)):
+            delta += _to_delta(int(amount_text), unit.lower())
+        remind_at = now + delta if delta else None
+        return remind_at if remind_at and remind_at > now else None
+
     offset_match = _RE_REMIND_OFFSET.search(text)
     if offset_match and due_at:
         amount = int(offset_match.group(1))
@@ -182,6 +197,7 @@ def _cleanup_title(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = _RE_REMIND_OFFSET.sub("", text)
     text = _RE_REMIND_AT.sub("", text)
+    text = _RE_REMIND_IN.sub("", text)
     text = _RE_REPEAT_DAILY.sub("", text)
     text = _RE_REPEAT_WEEKLY.sub("", text)
     text = _RE_REPEAT_MONTHLY.sub("", text)
