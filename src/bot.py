@@ -5,6 +5,7 @@ from datetime import datetime, time
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -206,10 +207,11 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not query or not query.data:
         return
     if not _is_allowed(update, context):
-        await _deny(update)
+        await query.answer("Нет доступа", show_alert=True)
         return
     if not query.data.startswith("done:"):
         return
+    await query.answer("Ок")
     task_id_text = query.data.split(":", 1)[1]
     if not task_id_text.isdigit():
         await query.answer("Некорректный id", show_alert=True)
@@ -223,8 +225,12 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("Задача не найдена", show_alert=True)
         return
     message = _complete_task(task, context, settings, db_path)
-    await query.answer("Готово")
-    await query.edit_message_text(message)
+    try:
+        await query.edit_message_text(message)
+    except TelegramError:
+        logger.exception("Failed to edit message after done callback")
+        if query.message:
+            await query.message.reply_text(message)
 
 
 def schedule_reminder(app: Application, task: Task) -> None:
