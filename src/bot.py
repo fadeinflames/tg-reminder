@@ -16,12 +16,15 @@ from telegram.ext import (
 )
 
 from .config import Settings, load_settings
+import dateparser
+
 from .database import Task, create_task, delete_task, get_task, init_db, list_future_reminders
 from .database import (
     list_chat_ids_with_open_tasks,
     list_tasks_for_chat,
     update_task_fields,
     update_task_status,
+    update_task_title,
 )
 from .parser import parse_task_text
 from .utils import format_dt, next_due_date
@@ -77,17 +80,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
-    if not tasks:
-        await update.message.reply_text("Открытых задач нет.")
-        return
-    lines = [f"📋 Открытые задачи ({len(tasks)}):"]
-    lines.extend(_format_task_lines(tasks))
-    keyboard = _build_done_keyboard(tasks)
-    await update.message.reply_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
-    )
+    await _send_task_list(context, chat_id, db_path)
 
 
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,6 +103,10 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db_path: str = context.bot_data["db_path"]
     text = (update.message.text or "").strip()
     if not text:
+        return
+    pending = context.user_data.get("pending_action")
+    if pending:
+        await _handle_pending_action(update, context, pending, text, settings, db_path)
         return
 
     now = datetime.now(settings.tz)
@@ -211,9 +208,9 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("Нет доступа", show_alert=True)
         return
     await query.answer("Ок")
-    if not query.data.startswith("done:"):
+    action, task_id_text = _parse_callback(query.data)
+    if not action:
         return
-    task_id_text = query.data.split(":", 1)[1]
     if not task_id_text.isdigit():
         await query.answer("Некорректный id", show_alert=True)
         return
@@ -225,14 +222,39 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not task:
         await query.answer("Задача не найдена", show_alert=True)
         return
-    message = _complete_task(task, context, settings, db_path)
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(message)
-    except TelegramError:
-        logger.exception("Failed to edit message after done callback")
-        if query.message:
-            await query.message.reply_text(message)
+    if action == "done":
+        message = _complete_task(task, context, settings, db_path)
+        await _finalize_callback(query, message)
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, db_path)
+        return
+    if action == "open":
+        if update.effective_chat:
+            await _send_task_detail(context, update.effective_chat.id, task)
+        return
+    if action == "edit":
+        context.user_data["pending_action"] = {"type": "edit_text", "task_id": task.id}
+        await _finalize_callback(query, "Напиши новый текст задачи.")
+        return
+    if action == "resched":
+        context.user_data["pending_action"] = {
+            "type": "reschedule",
+            "task_id": task.id,
+        }
+        await _finalize_callback(query, "Напиши новую дату/время (например: завтра 18:00).")
+        return
+    if action == "delete":
+        if delete_task(db_path, task.id, task.user_id):
+            remove_reminder(context.application, task.id)
+            await _finalize_callback(query, "🗑️ Задача удалена.")
+            if update.effective_chat:
+                await _send_task_list(context, update.effective_chat.id, db_path)
+        else:
+            await _finalize_callback(query, "Не удалось удалить задачу.")
+        return
+    if action == "back":
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, db_path)
 
 
 def schedule_reminder(app: Application, task: Task) -> None:
@@ -346,7 +368,12 @@ def _build_done_keyboard(tasks: list[Task]) -> list[list[InlineKeyboardButton]]:
     for task in tasks:
         title = " ".join(task.title.split())
         label = title if len(title) <= 40 else f"{title[:37]}..."
-        keyboard.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{task.id}")])
+        keyboard.append(
+            [
+                InlineKeyboardButton("✅", callback_data=f"done:{task.id}"),
+                InlineKeyboardButton(f"📝 {label}", callback_data=f"open:{task.id}"),
+            ]
+        )
     return keyboard
 
 
@@ -382,6 +409,140 @@ def _complete_task(
     update_task_status(db_path, task.id, "done", datetime.utcnow())
     remove_reminder(context.application, task.id)
     return "✅ Задача отмечена выполненной."
+
+
+def _parse_callback(data: str) -> tuple[str | None, str]:
+    if ":" not in data:
+        return None, ""
+    action, task_id_text = data.split(":", 1)
+    if action not in {"done", "open", "edit", "resched", "delete", "back"}:
+        return None, ""
+    return action, task_id_text
+
+
+async def _finalize_callback(query, message: str) -> None:
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(message)
+    except TelegramError:
+        logger.exception("Failed to edit message after callback")
+        if query.message:
+            await query.message.reply_text(message)
+
+
+async def _send_task_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int, db_path: str) -> None:
+    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+    if not tasks:
+        await context.bot.send_message(chat_id=chat_id, text="Открытых задач нет.")
+        return
+    lines = [f"📋 Открытые задачи ({len(tasks)}):"]
+    lines.extend(_format_task_lines(tasks))
+    keyboard = _build_done_keyboard(tasks)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+    )
+
+
+async def _send_task_detail(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task: Task) -> None:
+    text = (
+        f"📝 Задача #{task.id}\n"
+        f"{task.title}\n"
+        f"Срок: {format_dt(task.due_at)}\n"
+        f"Напоминание: {format_dt(task.remind_at)}\n"
+        f"Повтор: {task.repeat_rule or '—'}"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Выполнено", callback_data=f"done:{task.id}"),
+                InlineKeyboardButton("✏️ Текст", callback_data=f"edit:{task.id}"),
+            ],
+            [
+                InlineKeyboardButton("⏰ Время", callback_data=f"resched:{task.id}"),
+                InlineKeyboardButton("🗑 Удалить", callback_data=f"delete:{task.id}"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад к списку", callback_data="back:0")],
+        ]
+    )
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+
+async def _handle_pending_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    pending: dict,
+    text: str,
+    settings: Settings,
+    db_path: str,
+) -> None:
+    if text.lower() in {"/cancel", "отмена"}:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Отменено.")
+        return
+    task_id = pending.get("task_id")
+    action_type = pending.get("type")
+    task = get_task(db_path, task_id, update.effective_user.id)
+    if not task:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Задача не найдена.")
+        return
+    if action_type == "edit_text":
+        clean = " ".join(text.split())
+        if not clean:
+            await update.message.reply_text("Текст не должен быть пустым.")
+            return
+        update_task_title(db_path, task.id, clean)
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("✅ Текст обновлён.")
+    elif action_type == "reschedule":
+        now = datetime.now(settings.tz)
+        new_due = _parse_user_datetime(text, settings, now)
+        if not new_due:
+            await update.message.reply_text(
+                "Не понял дату. Пример: завтра 18:00"
+            )
+            return
+        remove_reminder(context.application, task.id)
+        new_remind = new_due
+        if task.remind_at and task.due_at and task.remind_at < task.due_at:
+            offset = task.due_at - task.remind_at
+            candidate = new_due - offset
+            if candidate > now:
+                new_remind = candidate
+        update_task_fields(
+            db_path,
+            task.id,
+            due_at=new_due,
+            remind_at=new_remind,
+            repeat_rule=task.repeat_rule,
+        )
+        if new_remind and new_remind > now:
+            task.due_at = new_due
+            task.remind_at = new_remind
+            schedule_reminder(context.application, task)
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text(f"✅ Перенесено на {format_dt(new_due)}")
+    else:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Неизвестное действие.")
+    if update.effective_chat:
+        await _send_task_list(context, update.effective_chat.id, db_path)
+
+
+def _parse_user_datetime(text: str, settings: Settings, now: datetime) -> datetime | None:
+    parsed = dateparser.parse(
+        text,
+        languages=["ru"],
+        settings={
+            "RELATIVE_BASE": now,
+            "TIMEZONE": str(settings.tz),
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    return parsed if parsed and parsed > now else None
 
 
 def main() -> None:
