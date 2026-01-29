@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,6 +12,8 @@ import requests
 from dateparser.search import search_dates
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +41,11 @@ _RE_DATE_HINT = re.compile(
     r"\bутра\b|\bднем\b|\bвечером\b|\bночью\b)",
     re.IGNORECASE,
 )
+_RE_TIME_TOKEN = re.compile(r"\b\d{1,2}([.:]\d{2})?\b")
+_RE_DATE_WORD = re.compile(
+    r"\b(сегодня|завтра|послезавтра|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)\b",
+    re.IGNORECASE,
+)
 _RE_REPEAT_DAILY = re.compile(r"(каждый день|ежедневно)", re.IGNORECASE)
 _RE_REPEAT_WEEKLY = re.compile(r"(каждую неделю|еженедельно)", re.IGNORECASE)
 _RE_REPEAT_MONTHLY = re.compile(r"(каждый месяц|ежемесячно)", re.IGNORECASE)
@@ -50,7 +58,9 @@ def parse_task_text(text: str, now: datetime, settings: Settings) -> ParsedTask:
     if settings.perplexity_api_key:
         parsed = _parse_with_perplexity(text, now, settings)
         if parsed:
+            logger.info("Perplexity parse success")
             return parsed
+        logger.warning("Perplexity parse failed, fallback to local parser")
     return _parse_fallback(text, now, settings)
 
 
@@ -135,19 +145,9 @@ def _parse_fallback(text: str, now: datetime, settings: Settings) -> ParsedTask:
 
 
 def _extract_due_date(text: str, now: datetime, settings: Settings) -> datetime | None:
-    if _RE_DATE_HINT.search(text):
-        parsed = dateparser.parse(
-            text,
-            languages=["ru"],
-            settings={
-                "RELATIVE_BASE": now,
-                "TIMEZONE": str(settings.tz),
-                "RETURN_AS_TIMEZONE_AWARE": True,
-                "PREFER_DATES_FROM": "future",
-            },
-        )
-        if parsed and parsed > now:
-            return parsed
+    combined = _extract_date_with_time(text, now, settings)
+    if combined:
+        return combined
     matches = search_dates(
         text,
         languages=["ru"],
@@ -171,6 +171,54 @@ def _extract_due_date(text: str, now: datetime, settings: Settings) -> datetime 
             candidates.sort(key=lambda item: (not item[0], item[1]))
             return candidates[0][1]
     return None
+
+
+def _extract_date_with_time(text: str, now: datetime, settings: Settings) -> datetime | None:
+    if not _RE_DATE_HINT.search(text):
+        return None
+    date_word_match = _RE_DATE_WORD.search(text)
+    if not date_word_match:
+        return None
+    time_match = _RE_TIME_TOKEN.search(text)
+    if not time_match and not re.search(r"\b(утра|днем|вечером|ночью)\b", text, re.IGNORECASE):
+        return None
+    date_part = dateparser.parse(
+        date_word_match.group(0),
+        languages=["ru"],
+        settings={
+            "RELATIVE_BASE": now,
+            "TIMEZONE": str(settings.tz),
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    if not date_part:
+        return None
+    time_text = time_match.group(0) if time_match else "00:00"
+    suffix_match = re.search(r"\b(утра|днем|вечером|ночью)\b", text, re.IGNORECASE)
+    if suffix_match:
+        time_text = f"{time_text} {suffix_match.group(0)}"
+    time_part = dateparser.parse(
+        time_text,
+        languages=["ru"],
+        settings={
+            "RELATIVE_BASE": now,
+            "TIMEZONE": str(settings.tz),
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    if not time_part:
+        return None
+    try:
+        return date_part.replace(
+            hour=time_part.hour,
+            minute=time_part.minute,
+            second=0,
+            microsecond=0,
+        )
+    except ValueError:
+        return None
 
 
 def _extract_remind_at(
