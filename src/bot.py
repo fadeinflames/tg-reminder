@@ -1,24 +1,36 @@
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, time, timedelta
+import re
+from datetime import datetime, time
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import requests
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from .config import Settings, load_settings
-from .database import Task, create_task, get_task, init_db, list_future_reminders
+import dateparser
+
+from .database import Task, create_task, delete_task, get_task, init_db, list_future_reminders
 from .database import (
     list_chat_ids_with_open_tasks,
     list_tasks_for_chat,
-    list_tasks_with_notion,
-    update_task_notion_id,
+    update_task_fields,
     update_task_status,
+    update_task_title,
 )
-from .notion import archive_block, archive_page, get_block, get_page, sync_task_created
 from .parser import parse_task_text
-from .utils import format_dt
+from .utils import format_dt, next_due_date
 
 
 logging.basicConfig(
@@ -56,9 +68,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _deny(update)
         return
     await update.message.reply_text(
-        "Просто отправь сообщение, и оно станет задачей в Notion.\n"
+        "Просто отправь сообщение, и оно станет задачей.\n"
         "Пример: Созвон с клиентом завтра 15:00 напомни за 1 час\n"
-        "Повторы: ежедневно, еженедельно, каждые 3 дня"
+        "Повторы: ежедневно, еженедельно, каждые 3 дня\n"
+        "Команды: /list, /done <id>, /delete <id>, /sync, /cleanup"
+    )
+
+
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    db_path: str = context.bot_data["db_path"]
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    await _send_task_list(context, chat_id, db_path)
+
+
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    rescheduled = reschedule_all_reminders(context)
+    await update.message.reply_text(
+        f"✅ Напоминания пересчитаны: {rescheduled}"
     )
 
 
@@ -66,10 +100,16 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not _is_allowed(update, context):
         await _deny(update)
         return
+    if update.effective_user and update.effective_user.is_bot:
+        return
     settings: Settings = context.bot_data["settings"]
     db_path: str = context.bot_data["db_path"]
     text = (update.message.text or "").strip()
     if not text:
+        return
+    pending = context.user_data.get("pending_action")
+    if pending:
+        await _handle_pending_action(update, context, pending, text, settings, db_path)
         return
 
     now = datetime.now(settings.tz)
@@ -94,12 +134,8 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if task.remind_at:
         schedule_reminder(context.application, task)
 
-    notion_id = sync_task_created(settings, task)
-    if notion_id:
-        update_task_notion_id(db_path, task_id, notion_id)
-
     await update.message.reply_text(
-        f"✅ Добавлено в Notion #{task_id}\n"
+        f"✅ Добавлено #{task_id}\n"
         f"Текст: {task.title}\n"
         f"Срок: {format_dt(task.due_at)}\n"
         f"Напоминание: {format_dt(task.remind_at)}\n"
@@ -126,6 +162,128 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Выполнить: /done {task.id}"
         ),
     )
+
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    db_path: str = context.bot_data["db_path"]
+    settings: Settings = context.bot_data["settings"]
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Используй: /done <id>")
+        return
+    task_id = int(context.args[0])
+    task = get_task(db_path, task_id, update.effective_user.id)
+    if not task:
+        await update.message.reply_text("Задача не найдена.")
+        return
+    message = _complete_task(task, context, settings, db_path)
+    await update.message.reply_text(message)
+
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    db_path: str = context.bot_data["db_path"]
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Используй: /delete <id>")
+        return
+    task_id = int(context.args[0])
+    task = get_task(db_path, task_id, update.effective_user.id)
+    if not task:
+        await update.message.reply_text("Задача не найдена.")
+        return
+    if delete_task(db_path, task_id, update.effective_user.id):
+        remove_reminder(context.application, task_id)
+        await update.message.reply_text("🗑️ Задача удалена.")
+        return
+    await update.message.reply_text("Не удалось удалить задачу.")
+
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, context):
+        await _deny(update)
+        return
+    db_path: str = context.bot_data["db_path"]
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    raw = (update.message.text or "").strip()
+    settings: Settings = context.bot_data["settings"]
+    keep_lines = _extract_keep_lines(raw)
+    if not keep_lines and settings.perplexity_api_key:
+        keep_lines = _extract_keep_lines_with_perplexity(raw, settings)
+    if keep_lines:
+        removed = _cleanup_tasks(db_path, chat_id, keep_lines)
+        await update.message.reply_text(f"🧹 Удалено задач: {removed}")
+        await _send_task_list(context, chat_id, db_path)
+        return
+    context.user_data["pending_action"] = {"type": "cleanup_keep", "chat_id": chat_id}
+    await update.message.reply_text(
+        "Пришли список задач, которые нужно оставить (по одной на строку)."
+    )
+
+
+async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    logger.info("Callback received: %s", query.data)
+    if not _is_allowed(update, context):
+        await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer("Ок")
+    action, task_id_text = _parse_callback(query.data)
+    if not action:
+        return
+    if action == "back":
+        await _finalize_callback(query, "Ок")
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, context.bot_data["db_path"])
+        return
+    if not task_id_text.isdigit():
+        await query.answer("Некорректный id", show_alert=True)
+        return
+    task_id = int(task_id_text)
+    db_path: str = context.bot_data["db_path"]
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    task = get_task(db_path, task_id, user_id)
+    if not task:
+        await query.answer("Задача не найдена", show_alert=True)
+        return
+    if action == "done":
+        message = _complete_task(task, context, settings, db_path)
+        await _finalize_callback(query, message)
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, db_path)
+        return
+    if action == "open":
+        if update.effective_chat:
+            await _send_task_detail(context, update.effective_chat.id, task)
+        return
+    if action == "edit":
+        context.user_data["pending_action"] = {"type": "edit_text", "task_id": task.id}
+        await _finalize_callback(query, "Напиши новый текст задачи.")
+        return
+    if action == "resched":
+        context.user_data["pending_action"] = {
+            "type": "reschedule",
+            "task_id": task.id,
+        }
+        await _finalize_callback(query, "Напиши новую дату/время (например: завтра 18:00).")
+        return
+    if action == "delete":
+        if delete_task(db_path, task.id, task.user_id):
+            remove_reminder(context.application, task.id)
+            await _finalize_callback(query, "🗑️ Задача удалена.")
+            if update.effective_chat:
+                await _send_task_list(context, update.effective_chat.id, db_path)
+        else:
+            await _finalize_callback(query, "Не удалось удалить задачу.")
+        return
 
 
 def schedule_reminder(app: Application, task: Task) -> None:
@@ -189,39 +347,22 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
 
-async def sync_closed_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings: Settings = context.bot_data["settings"]
+def reschedule_all_reminders(context: ContextTypes.DEFAULT_TYPE) -> int:
     db_path: str = context.bot_data["db_path"]
-    for task in list_tasks_with_notion(db_path):
-        if not task.notion_page_id:
-            continue
-        if _is_task_closed_in_notion(settings, task.notion_page_id):
-            if settings.notion_page_id:
-                archived = archive_block(settings, task.notion_page_id)
-            else:
-                archived = archive_page(settings, task.notion_page_id)
-            if archived:
-                update_task_status(db_path, task.id, "done", datetime.utcnow())
-                remove_reminder(context.application, task.id)
+    settings: Settings = context.bot_data["settings"]
+    _remove_all_reminders(context.application)
+    now = datetime.now(settings.tz)
+    count = 0
+    for task in list_future_reminders(db_path, now):
+        schedule_reminder(context.application, task)
+        count += 1
+    return count
 
 
-def _is_task_closed_in_notion(settings: Settings, page_id: str) -> bool:
-    if settings.notion_db_id and settings.notion_prop_done:
-        page = get_page(settings, page_id)
-        if not page:
-            return False
-        prop = page.get("properties", {}).get(settings.notion_prop_done)
-        if not prop:
-            return False
-        return bool(prop.get("checkbox"))
-
-    block = get_block(settings, page_id)
-    if not block:
-        return False
-    if block.get("type") != "to_do":
-        return False
-    to_do = block.get("to_do", {})
-    return bool(to_do.get("checked"))
+def _remove_all_reminders(app: Application) -> None:
+    for job in list(app.job_queue.jobs()):
+        if job.name and job.name.startswith("remind_"):
+            job.schedule_removal()
 
 
 
@@ -238,22 +379,304 @@ async def on_startup(app: Application) -> None:
             time(hour=hour, minute=0, tzinfo=settings.tz),
             name=f"daily_summary_{hour}",
         )
-    app.job_queue.run_repeating(
-        sync_closed_tasks,
-        interval=timedelta(minutes=settings.sync_interval_minutes),
-        first=timedelta(minutes=min(2, settings.sync_interval_minutes)),
-        name="sync_closed_tasks",
-    )
 
 
 def _format_task_lines(tasks: list[Task]) -> list[str]:
     lines = []
     for task in tasks:
-        lines.append(
-            f"• {task.title} | срок: {format_dt(task.due_at)} | "
-            f"напомнить: {format_dt(task.remind_at)}"
-        )
+        title = " ".join(task.title.split())
+        parts = [f"• {title}"]
+        if task.due_at:
+            parts.append(f"срок: {format_dt(task.due_at)}")
+        if task.remind_at:
+            parts.append(f"напомнить: {format_dt(task.remind_at)}")
+        lines.append(" | ".join(parts))
     return lines
+
+
+def _build_list_keyboard(tasks: list[Task]) -> list[list[InlineKeyboardButton]]:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for task in tasks:
+        title = " ".join(task.title.split())
+        label = title if len(title) <= 40 else f"{title[:37]}..."
+        keyboard.append(
+            [
+                InlineKeyboardButton(f"📝 {label}", callback_data=f"open:{task.id}"),
+            ]
+        )
+    return keyboard
+
+
+def _complete_task(
+    task: Task,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings: Settings,
+    db_path: str,
+) -> str:
+    now = datetime.now(settings.tz)
+    next_due = next_due_date(task.due_at, task.repeat_rule)
+    if task.repeat_rule and next_due:
+        remove_reminder(context.application, task.id)
+        new_remind = None
+        if task.remind_at and task.due_at and task.remind_at < task.due_at:
+            offset = task.due_at - task.remind_at
+            candidate = next_due - offset
+            if candidate > now:
+                new_remind = candidate
+        update_task_fields(
+            db_path,
+            task.id,
+            due_at=next_due,
+            remind_at=new_remind,
+            repeat_rule=task.repeat_rule,
+        )
+        update_task_status(db_path, task.id, "open", datetime.utcnow())
+        if new_remind:
+            task.due_at = next_due
+            task.remind_at = new_remind
+            schedule_reminder(context.application, task)
+        return f"✅ Повтор перенесён на {format_dt(next_due)}"
+    update_task_status(db_path, task.id, "done", datetime.utcnow())
+    remove_reminder(context.application, task.id)
+    return "✅ Задача отмечена выполненной."
+
+
+def _parse_callback(data: str) -> tuple[str | None, str]:
+    if ":" not in data:
+        return None, ""
+    action, task_id_text = data.split(":", 1)
+    if action not in {"done", "open", "edit", "resched", "delete", "back"}:
+        return None, ""
+    return action, task_id_text
+
+
+async def _finalize_callback(query, message: str) -> None:
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(message)
+    except TelegramError:
+        logger.exception("Failed to edit message after callback")
+        if query.message:
+            await query.message.reply_text(message)
+
+
+async def _send_task_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int, db_path: str) -> None:
+    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+    if not tasks:
+        await context.bot.send_message(chat_id=chat_id, text="Открытых задач нет.")
+        return
+    lines = [f"📋 Открытые задачи ({len(tasks)}):"]
+    lines.extend(_format_task_lines(tasks))
+    keyboard = _build_list_keyboard(tasks)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+    )
+
+
+async def _send_task_detail(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task: Task) -> None:
+    lines = [f"📝 Задача #{task.id}", task.title]
+    if task.due_at:
+        lines.append(f"Срок: {format_dt(task.due_at)}")
+    if task.remind_at:
+        lines.append(f"Напоминание: {format_dt(task.remind_at)}")
+    if task.repeat_rule:
+        lines.append(f"Повтор: {task.repeat_rule}")
+    text = "\n".join(lines)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Выполнено", callback_data=f"done:{task.id}"),
+                InlineKeyboardButton("✏️ Текст", callback_data=f"edit:{task.id}"),
+            ],
+            [
+                InlineKeyboardButton("⏰ Время", callback_data=f"resched:{task.id}"),
+                InlineKeyboardButton("🗑 Удалить", callback_data=f"delete:{task.id}"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад к списку", callback_data="back:0")],
+        ]
+    )
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+
+async def _handle_pending_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    pending: dict,
+    text: str,
+    settings: Settings,
+    db_path: str,
+) -> None:
+    if text.lower() in {"/cancel", "отмена"}:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Отменено.")
+        return
+    task_id = pending.get("task_id")
+    action_type = pending.get("type")
+    task = get_task(db_path, task_id, update.effective_user.id)
+    if not task:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Задача не найдена.")
+        return
+    if action_type == "cleanup_keep":
+        keep_lines = _extract_keep_lines(text)
+        if not keep_lines and settings.perplexity_api_key:
+            keep_lines = _extract_keep_lines_with_perplexity(text, settings)
+        removed = _cleanup_tasks(db_path, pending.get("chat_id"), keep_lines)
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text(f"🧹 Удалено задач: {removed}")
+        if update.effective_chat:
+            await _send_task_list(context, update.effective_chat.id, db_path)
+        return
+    if action_type == "edit_text":
+        clean = " ".join(text.split())
+        if not clean:
+            await update.message.reply_text("Текст не должен быть пустым.")
+            return
+        update_task_title(db_path, task.id, clean)
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("✅ Текст обновлён.")
+    elif action_type == "reschedule":
+        now = datetime.now(settings.tz)
+        new_due = _parse_user_datetime(text, settings, now)
+        if not new_due:
+            await update.message.reply_text(
+                "Не понял дату. Пример: завтра 18:00"
+            )
+            return
+        remove_reminder(context.application, task.id)
+        new_remind = new_due
+        if task.remind_at and task.due_at and task.remind_at < task.due_at:
+            offset = task.due_at - task.remind_at
+            candidate = new_due - offset
+            if candidate > now:
+                new_remind = candidate
+        update_task_fields(
+            db_path,
+            task.id,
+            due_at=new_due,
+            remind_at=new_remind,
+            repeat_rule=task.repeat_rule,
+        )
+        if new_remind and new_remind > now:
+            task.due_at = new_due
+            task.remind_at = new_remind
+            schedule_reminder(context.application, task)
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text(f"✅ Перенесено на {format_dt(new_due)}")
+    else:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Неизвестное действие.")
+    if update.effective_chat:
+        await _send_task_list(context, update.effective_chat.id, db_path)
+
+
+def _parse_user_datetime(text: str, settings: Settings, now: datetime) -> datetime | None:
+    parsed = dateparser.parse(
+        text,
+        languages=["ru"],
+        settings={
+            "RELATIVE_BASE": now,
+            "TIMEZONE": str(settings.tz),
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future",
+        },
+    )
+    return parsed if parsed and parsed > now else None
+
+
+def _extract_keep_lines(text: str) -> list[str]:
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("/cleanup"):
+            line = line[len("/cleanup") :].strip()
+        line = re.sub(r"^[•\-–\*]+\s*", "", line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _normalize_title(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def _cleanup_tasks(db_path: str, chat_id: int, keep_lines: list[str]) -> int:
+    if not keep_lines:
+        return 0
+    keep_norm = [_normalize_title(line) for line in keep_lines]
+    removed = 0
+    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+    for task in tasks:
+        title_norm = _normalize_title(task.title)
+        keep = any(
+            title_norm in keep_item or keep_item in title_norm for keep_item in keep_norm
+        )
+        if not keep:
+            if delete_task(db_path, task.id, task.user_id):
+                removed += 1
+    return removed
+
+
+def _extract_keep_lines_with_perplexity(text: str, settings: Settings) -> list[str]:
+    prompt = (
+        "Ты помощник для управления задачами. Из текста пользователя извлеки список задач, "
+        "которые НУЖНО ОСТАВИТЬ. Верни ТОЛЬКО JSON массив строк.\n"
+        "Правила:\n"
+        "- Если перечисление через точки/буллеты — возьми каждую строку.\n"
+        "- Если фраза 'удали все кроме ...' — верни элементы после 'кроме'.\n"
+        "- Нормализуй пробелы, не меняй смысл.\n"
+        f"Текст: {text}\n"
+        "JSON:"
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.perplexity_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "sonar",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+    }
+    try:
+        response = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        data = _safe_json_array(content)
+        if not data:
+            logger.warning("Perplexity cleanup parse failed, content=%r", content[:500])
+            return []
+        return [_normalize_title(item) for item in data if isinstance(item, str) and item.strip()]
+    except Exception:
+        logger.exception("Perplexity cleanup request failed")
+        return []
+
+
+def _safe_json_array(content: str) -> list[str] | None:
+    try:
+        data = json.loads(content)
+        return data if isinstance(data, list) else None
+    except Exception:
+        pass
+    if "[" in content and "]" in content:
+        start = content.find("[")
+        end = content.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            snippet = content[start : end + 1]
+            try:
+                data = json.loads(snippet)
+                return data if isinstance(data, list) else None
+            except Exception:
+                return None
+    return None
 
 
 def main() -> None:
@@ -272,10 +695,19 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list", list_command))
+    application.add_handler(CommandHandler("done", done_command))
+    application.add_handler(CommandHandler("delete", delete_command))
+    application.add_handler(CommandHandler("cleanup", cleanup_command))
+    application.add_handler(CommandHandler("sync", sync_command))
+    application.add_handler(CallbackQueryHandler(done_callback))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, capture_message)
     )
-    application.run_polling(close_loop=False)
+    application.run_polling(
+        close_loop=False,
+        allowed_updates=["message", "callback_query"],
+    )
 
 
 if __name__ == "__main__":

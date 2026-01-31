@@ -213,6 +213,30 @@ def update_task_notion_id(db_path: str, task_id: int, notion_page_id: str) -> No
         conn.commit()
 
 
+def update_task_title(db_path: str, task_id: int, title: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET title = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (title, _to_str(datetime.utcnow()), task_id),
+        )
+        conn.commit()
+
+
+def update_task_due_at(db_path: str, task_id: int, due_at: datetime | None) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET due_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (_to_str(due_at), _to_str(datetime.utcnow()), task_id),
+        )
+        conn.commit()
+
+
 def list_future_reminders(db_path: str, now: datetime) -> list[Task]:
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -270,6 +294,23 @@ def list_tasks_with_notion(db_path: str) -> list[Task]:
             """
         ).fetchall()
     return [_row_to_task(row) for row in rows]
+
+
+def list_tasks_with_notion_all(db_path: str) -> list[Task]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM tasks
+            WHERE notion_page_id IS NOT NULL
+            """
+        ).fetchall()
+    return [_row_to_task(row) for row in rows]
+
+
+def clear_tasks(db_path: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM tasks")
+        conn.commit()
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:

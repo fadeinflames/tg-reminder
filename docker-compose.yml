@@ -7,19 +7,9 @@ services:
       BOT_TZ: ${BOT_TZ:-Europe/Moscow}
       DB_PATH: /data/reminder.db
       PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-}
-      NOTION_TOKEN: ${NOTION_TOKEN:-}
-      NOTION_DB_ID: ${NOTION_DB_ID:-}
-      NOTION_PAGE_ID: ${NOTION_PAGE_ID:-}
       ALLOWED_USER_IDS: ${ALLOWED_USER_IDS}
-      NOTION_PROP_NAME: ${NOTION_PROP_NAME:-Name}
-      NOTION_PROP_STATUS: ${NOTION_PROP_STATUS:-Status}
-      NOTION_STATUS_VALUE: ${NOTION_STATUS_VALUE:-Open}
-      NOTION_PROP_DUE: ${NOTION_PROP_DUE:-Due}
-      NOTION_PROP_REPEAT: ${NOTION_PROP_REPEAT:-Repeat}
-      NOTION_PROP_DONE: ${NOTION_PROP_DONE:-Done}
-      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-5}
     volumes:
-      - tg-reminder-data:/data
+      - ./tg-reminder-data:/data
 
 volumes:
   tg-reminder-data:
