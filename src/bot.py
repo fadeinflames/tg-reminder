@@ -23,13 +23,13 @@ import dateparser
 
 from .database import Task, create_task, delete_task, get_task, init_db, list_future_reminders
 from .database import (
-    list_chat_ids_with_open_tasks,
-    list_tasks_for_chat,
+    list_chat_ids_for_user,
+    list_tasks,
     update_task_fields,
     update_task_status,
     update_task_title,
 )
-from .parser import parse_task_text
+from .parser import ParsedTask, parse_task_text
 from .utils import format_dt, next_due_date
 
 
@@ -81,9 +81,9 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     db_path: str = context.bot_data["db_path"]
     chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
+    if not chat_id or not update.effective_user:
         return
-    await _send_task_list(context, chat_id, db_path)
+    await _send_task_list(context, chat_id, update.effective_user.id, db_path)
 
 
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,14 +114,15 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     now = datetime.now(settings.tz)
     parsed = parse_task_text(text, now, settings)
+    due_at, remind_at = _normalize_parsed_dates(parsed, now)
     task = Task(
         id=None,
         user_id=update.effective_user.id,
         chat_id=update.effective_chat.id,
         title=parsed.title,
         description=parsed.description,
-        due_at=parsed.due_at,
-        remind_at=parsed.remind_at,
+        due_at=due_at,
+        remind_at=remind_at,
         repeat_rule=parsed.repeat_rule,
         notion_page_id=None,
         status="open",
@@ -131,7 +132,7 @@ async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     task_id = create_task(db_path, task)
     task.id = task_id
 
-    if task.remind_at:
+    if task.remind_at and task.remind_at > now:
         schedule_reminder(context.application, task)
 
     await update.message.reply_text(
@@ -208,7 +209,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     db_path: str = context.bot_data["db_path"]
     chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
+    if not chat_id or not update.effective_user:
         return
     raw = (update.message.text or "").strip()
     settings: Settings = context.bot_data["settings"]
@@ -216,11 +217,13 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not keep_lines and settings.perplexity_api_key:
         keep_lines = _extract_keep_lines_with_perplexity(raw, settings)
     if keep_lines:
-        removed = _cleanup_tasks(db_path, chat_id, keep_lines)
-        await update.message.reply_text(f"🧹 Удалено задач: {removed}")
-        await _send_task_list(context, chat_id, db_path)
+        removed_ids = _cleanup_tasks(db_path, update.effective_user.id, keep_lines)
+        for task_id in removed_ids:
+            remove_reminder(context.application, task_id)
+        await update.message.reply_text(f"🧹 Удалено задач: {len(removed_ids)}")
+        await _send_task_list(context, chat_id, update.effective_user.id, db_path)
         return
-    context.user_data["pending_action"] = {"type": "cleanup_keep", "chat_id": chat_id}
+    context.user_data["pending_action"] = {"type": "cleanup_keep"}
     await update.message.reply_text(
         "Пришли список задач, которые нужно оставить (по одной на строку)."
     )
@@ -240,8 +243,13 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if action == "back":
         await _finalize_callback(query, "Ок")
-        if update.effective_chat:
-            await _send_task_list(context, update.effective_chat.id, context.bot_data["db_path"])
+        if update.effective_chat and update.effective_user:
+            await _send_task_list(
+                context,
+                update.effective_chat.id,
+                update.effective_user.id,
+                context.bot_data["db_path"],
+            )
         return
     if not task_id_text.isdigit():
         await query.answer("Некорректный id", show_alert=True)
@@ -257,8 +265,8 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if action == "done":
         message = _complete_task(task, context, settings, db_path)
         await _finalize_callback(query, message)
-        if update.effective_chat:
-            await _send_task_list(context, update.effective_chat.id, db_path)
+        if update.effective_chat and update.effective_user:
+            await _send_task_list(context, update.effective_chat.id, update.effective_user.id, db_path)
         return
     if action == "open":
         if update.effective_chat:
@@ -279,8 +287,8 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if delete_task(db_path, task.id, task.user_id):
             remove_reminder(context.application, task.id)
             await _finalize_callback(query, "🗑️ Задача удалена.")
-            if update.effective_chat:
-                await _send_task_list(context, update.effective_chat.id, db_path)
+            if update.effective_chat and update.effective_user:
+                await _send_task_list(context, update.effective_chat.id, update.effective_user.id, db_path)
         else:
             await _finalize_callback(query, "Не удалось удалить задачу.")
         return
@@ -311,40 +319,45 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     now = datetime.now(settings.tz)
     today = now.date()
-    chat_ids = list_chat_ids_with_open_tasks(db_path)
-    for chat_id in chat_ids:
-        tasks = list_tasks_for_chat(db_path, chat_id, status="open")
-        if not tasks:
-            continue
-        overdue: list[Task] = []
-        today_tasks: list[Task] = []
-        upcoming: list[Task] = []
-        no_due: list[Task] = []
-        for task in tasks:
-            if not task.due_at:
-                no_due.append(task)
+    for user_id in settings.allowed_user_ids:
+        chat_ids = list_chat_ids_for_user(db_path, user_id)
+        for chat_id in chat_ids:
+            tasks = [
+                task
+                for task in list_tasks(db_path, user_id, status="open")
+                if task.chat_id == chat_id
+            ]
+            if not tasks:
                 continue
-            if task.due_at.date() < today:
-                overdue.append(task)
-            elif task.due_at.date() == today:
-                today_tasks.append(task)
-            else:
-                upcoming.append(task)
+            overdue: list[Task] = []
+            today_tasks: list[Task] = []
+            upcoming: list[Task] = []
+            no_due: list[Task] = []
+            for task in tasks:
+                if not task.due_at:
+                    no_due.append(task)
+                    continue
+                if task.due_at.date() < today:
+                    overdue.append(task)
+                elif task.due_at.date() == today:
+                    today_tasks.append(task)
+                else:
+                    upcoming.append(task)
 
-        lines = [f"📋 Список задач ({len(tasks)}):"]
-        if overdue:
-            lines.append("Просроченные:")
-            lines.extend(_format_task_lines(overdue))
-        if today_tasks:
-            lines.append("Сегодня:")
-            lines.extend(_format_task_lines(today_tasks))
-        if upcoming:
-            lines.append("Скоро:")
-            lines.extend(_format_task_lines(upcoming))
-        if no_due:
-            lines.append("Без срока:")
-            lines.extend(_format_task_lines(no_due))
-        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            lines = [f"📋 Список задач ({len(tasks)}):"]
+            if overdue:
+                lines.append("Просроченные:")
+                lines.extend(_format_task_lines(overdue))
+            if today_tasks:
+                lines.append("Сегодня:")
+                lines.extend(_format_task_lines(today_tasks))
+            if upcoming:
+                lines.append("Скоро:")
+                lines.extend(_format_task_lines(upcoming))
+            if no_due:
+                lines.append("Без срока:")
+                lines.extend(_format_task_lines(no_due))
+            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
 
 def reschedule_all_reminders(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -460,8 +473,10 @@ async def _finalize_callback(query, message: str) -> None:
             await query.message.reply_text(message)
 
 
-async def _send_task_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int, db_path: str) -> None:
-    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+async def _send_task_list(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, db_path: str
+) -> None:
+    tasks = list_tasks(db_path, user_id, status="open")
     if not tasks:
         await context.bot.send_message(chat_id=chat_id, text="Открытых задач нет.")
         return
@@ -514,20 +529,27 @@ async def _handle_pending_action(
         return
     task_id = pending.get("task_id")
     action_type = pending.get("type")
-    task = get_task(db_path, task_id, update.effective_user.id)
-    if not task:
-        context.user_data.pop("pending_action", None)
-        await update.message.reply_text("Задача не найдена.")
-        return
     if action_type == "cleanup_keep":
         keep_lines = _extract_keep_lines(text)
         if not keep_lines and settings.perplexity_api_key:
             keep_lines = _extract_keep_lines_with_perplexity(text, settings)
-        removed = _cleanup_tasks(db_path, pending.get("chat_id"), keep_lines)
+        if not keep_lines:
+            await update.message.reply_text(
+                "Не нашёл задач в сообщении. Пришли список ещё раз."
+            )
+            return
+        removed_ids = _cleanup_tasks(db_path, update.effective_user.id, keep_lines)
+        for removed_id in removed_ids:
+            remove_reminder(context.application, removed_id)
         context.user_data.pop("pending_action", None)
-        await update.message.reply_text(f"🧹 Удалено задач: {removed}")
+        await update.message.reply_text(f"🧹 Удалено задач: {len(removed_ids)}")
         if update.effective_chat:
-            await _send_task_list(context, update.effective_chat.id, db_path)
+            await _send_task_list(context, update.effective_chat.id, update.effective_user.id, db_path)
+        return
+    task = get_task(db_path, task_id, update.effective_user.id)
+    if not task:
+        context.user_data.pop("pending_action", None)
+        await update.message.reply_text("Задача не найдена.")
         return
     if action_type == "edit_text":
         clean = " ".join(text.split())
@@ -568,8 +590,8 @@ async def _handle_pending_action(
     else:
         context.user_data.pop("pending_action", None)
         await update.message.reply_text("Неизвестное действие.")
-    if update.effective_chat:
-        await _send_task_list(context, update.effective_chat.id, db_path)
+    if update.effective_chat and update.effective_user:
+        await _send_task_list(context, update.effective_chat.id, update.effective_user.id, db_path)
 
 
 def _parse_user_datetime(text: str, settings: Settings, now: datetime) -> datetime | None:
@@ -604,12 +626,12 @@ def _normalize_title(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
-def _cleanup_tasks(db_path: str, chat_id: int, keep_lines: list[str]) -> int:
+def _cleanup_tasks(db_path: str, user_id: int, keep_lines: list[str]) -> list[int]:
     if not keep_lines:
-        return 0
+        return []
     keep_norm = [_normalize_title(line) for line in keep_lines]
-    removed = 0
-    tasks = list_tasks_for_chat(db_path, chat_id, status="open")
+    removed_ids: list[int] = []
+    tasks = list_tasks(db_path, user_id, status="open")
     for task in tasks:
         title_norm = _normalize_title(task.title)
         keep = any(
@@ -617,8 +639,32 @@ def _cleanup_tasks(db_path: str, chat_id: int, keep_lines: list[str]) -> int:
         )
         if not keep:
             if delete_task(db_path, task.id, task.user_id):
-                removed += 1
-    return removed
+                removed_ids.append(task.id)
+    return removed_ids
+
+
+def _normalize_parsed_dates(
+    parsed: ParsedTask, now: datetime
+) -> tuple[datetime | None, datetime | None]:
+    due_at = parsed.due_at
+    remind_at = parsed.remind_at
+    if due_at and parsed.repeat_rule and due_at <= now:
+        candidate = due_at
+        for _ in range(366):
+            if candidate and candidate > now:
+                break
+            candidate = next_due_date(candidate, parsed.repeat_rule)
+        if candidate and candidate > now:
+            if remind_at and due_at and remind_at < due_at:
+                offset = due_at - remind_at
+                candidate_remind = candidate - offset
+                remind_at = candidate_remind if candidate_remind > now else None
+            due_at = candidate
+    if remind_at and remind_at <= now:
+        remind_at = None
+    if remind_at and not due_at:
+        due_at = remind_at
+    return due_at, remind_at
 
 
 def _extract_keep_lines_with_perplexity(text: str, settings: Settings) -> list[str]:

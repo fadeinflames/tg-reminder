@@ -59,9 +59,9 @@ def parse_task_text(text: str, now: datetime, settings: Settings) -> ParsedTask:
         parsed = _parse_with_perplexity(text, now, settings)
         if parsed:
             logger.info("Perplexity parse success")
-            return parsed
+            return _sanitize_parsed_task(parsed, now)
         logger.warning("Perplexity parse failed, fallback to local parser")
-    return _parse_fallback(text, now, settings)
+    return _sanitize_parsed_task(_parse_fallback(text, now, settings), now)
 
 
 def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> ParsedTask | None:
@@ -69,7 +69,7 @@ def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> Pars
         "Ты — парсер задач для Telegram-бота. Твоя цель — понять смысл задачи и вернуть ТОЛЬКО JSON.\n"
         "JSON поля: title (строка), description (строка или null), due_at (ISO8601 или null), "
         "remind_at (ISO8601 или null), repeat_rule (строка или null).\n"
-        "Timezone: Europe/Moscow. Если даты нет, верни null. "
+        f"Timezone: {settings.tz}. Если даты нет, верни null. "
         "repeat_rule: daily|weekly|monthly|yearly|every N days|every N weeks|none.\n"
         "Правила:\n"
         "- title: краткая суть задачи, без фраз 'напомни', 'через', дат/времени.\n"
@@ -121,8 +121,8 @@ def _parse_with_perplexity(text: str, now: datetime, settings: Settings) -> Pars
         return ParsedTask(
             title=str(data.get("title") or text),
             description=_nullify(data.get("description")),
-            due_at=_parse_dt(data.get("due_at")),
-            remind_at=_parse_dt(data.get("remind_at")),
+            due_at=_parse_dt(data.get("due_at"), settings.tz),
+            remind_at=_parse_dt(data.get("remind_at"), settings.tz),
             repeat_rule=_normalize_repeat(data.get("repeat_rule")),
         )
     except Exception:
@@ -304,15 +304,38 @@ def _cleanup_title(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip() or "Без названия"
 
 
-def _parse_dt(value: Any) -> datetime | None:
+def _parse_dt(value: Any, tz) -> datetime | None:
     if not value:
         return None
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=tz)
+            return parsed
         except ValueError:
             return None
     return None
+
+
+def _sanitize_parsed_task(parsed: ParsedTask, now: datetime) -> ParsedTask:
+    if parsed.due_at and parsed.due_at <= now and not parsed.repeat_rule:
+        due_at = None
+    else:
+        due_at = parsed.due_at
+    if parsed.repeat_rule and due_at:
+        remind_at = parsed.remind_at
+    else:
+        remind_at = parsed.remind_at if parsed.remind_at and parsed.remind_at > now else None
+    if remind_at and not due_at:
+        due_at = remind_at
+    return ParsedTask(
+        title=parsed.title,
+        description=parsed.description,
+        due_at=due_at,
+        remind_at=remind_at,
+        repeat_rule=parsed.repeat_rule,
+    )
 
 
 def _normalize_repeat(value: Any) -> str | None:

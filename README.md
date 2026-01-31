@@ -32,6 +32,11 @@ set ALLOWED_USER_IDS=123456789,987654321
 python -m src.bot
 ```
 
+## Тесты
+```bash
+pytest
+```
+
 ## Запуск в Docker
 ```bash
 docker compose up --build

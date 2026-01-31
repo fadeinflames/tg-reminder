@@ -285,6 +285,18 @@ def list_chat_ids_with_open_tasks(db_path: str) -> list[int]:
     return [int(row["chat_id"]) for row in rows]
 
 
+def list_chat_ids_for_user(db_path: str, user_id: int) -> list[int]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT chat_id FROM tasks
+            WHERE status = 'open' AND user_id = ?
+            """,
+            (user_id,),
+        ).fetchall()
+    return [int(row["chat_id"]) for row in rows]
+
+
 def list_tasks_with_notion(db_path: str) -> list[Task]:
     with _connect(db_path) as conn:
         rows = conn.execute(
